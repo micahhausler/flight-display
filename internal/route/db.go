@@ -123,7 +123,10 @@ func (db *DB) loadCSV(path string) (int, error) {
 }
 
 // Lookup returns the route for a callsign, or nil if not found.
-// The callsign is normalized before lookup.
+// The callsign is normalized before lookup. If the exact callsign is not found
+// and it has a letter suffix (e.g. SKW112J), the suffix is stripped and retried
+// (e.g. SKW112). Airlines add letter suffixes for operational reasons (second
+// sections, diversions) but the route is typically the same as the base flight.
 func (db *DB) Lookup(callsign string) *model.Route {
 	if db == nil {
 		return nil
@@ -132,5 +135,21 @@ func (db *DB) Lookup(callsign string) *model.Route {
 	if r, ok := db.routes[normalized]; ok {
 		return &r
 	}
+
+	// Strip trailing letters from the number portion and retry.
+	// SKW112J -> code=SKW number=112J -> strip trailing J -> try SKW112
+	m := callsignRegex.FindStringSubmatch(normalized)
+	if m == nil {
+		return nil
+	}
+	number := m[2]
+	stripped := strings.TrimRight(number, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	if stripped != "" && stripped != number {
+		retry := m[1] + stripped
+		if r, ok := db.routes[retry]; ok {
+			return &r
+		}
+	}
+
 	return nil
 }
