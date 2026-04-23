@@ -90,16 +90,40 @@ ambiguity propagates past the fetcher.
 
 ### Visibility
 
-The computation that determines whether an aircraft is in the aperture.
+The computation that determines whether an aircraft is in the aperture and close
+enough to see.
 
 Given an observer and an aircraft with known position and altitude:
 
 1. Compute the great-circle bearing from observer to aircraft (azimuth).
 2. Compute the elevation angle: `atan2(altitude_difference, ground_distance)`.
-3. Check if (azimuth, elevation) falls inside any rectangle in the aperture.
+3. Compute the slant range: `sqrt(ground_distance² + altitude_difference²)`.
+4. Check if (azimuth, elevation) falls inside any rectangle in the aperture.
+5. Check if slant range is within `max_range_km`.
+
+The slant range filter is the primary distance control. A commercial jet at cruise
+altitude (35,000 ft) is visible to the naked eye out to roughly 50-60 km in clear
+conditions. Aircraft beyond this distance are in the angular aperture but not actually
+visible from the window. Without a range limit, the system would display flights
+hundreds of kilometers away that happen to be in the right bearing/elevation wedge.
+
+The range limit also dramatically reduces the bounding box sent to OpenSky, which
+lowers API credit cost (a ~120km box costs 1 credit vs. 3-4 for the uncapped box).
 
 Aircraft without position (`Lat == nil || Lon == nil`) are never visible.
 Aircraft on the ground (`OnGround == true`) are never visible.
+
+Two additional filters suppress aircraft that are technically airborne per their
+transponder but not meaningfully visible:
+
+- **`min_alt_ft`**: Aircraft below this barometric altitude are suppressed. The
+  `OnGround` flag from ADS-B is unreliable — aircraft taxiing or holding at the gate
+  sometimes report as airborne. A minimum altitude relative to the local airport's
+  field elevation catches these. For a sea-level observer near SEA (field elevation
+  433 ft), a value of 500 ft filters ground operations cleanly.
+- **`min_speed_kt`**: Aircraft below this ground speed are suppressed. A taxiing
+  aircraft moves at 15-20 knots; anything in flight is doing 60+ knots. A threshold
+  of 50 knots catches the remaining ground traffic that passes the altitude filter.
 
 ### Sighting
 
@@ -249,18 +273,20 @@ box is a query optimization — it reduces the response size and API credit cost
 not a correctness boundary. The box must be large enough to contain all aircraft that
 could be visible at the maximum altitude and elevation angle the aperture allows.
 
-Bounding box sizing is derived from the aperture configuration:
+Bounding box sizing: when `max_range_km` is configured (the common case), the
+bounding box radius is simply `max_range_km` plus a margin for aircraft movement
+between polls. This produces a tight box (~120 km across for a 60 km range) that
+costs 1 API credit per query.
+
+When `max_range_km` is not configured, the radius is derived from the aperture:
 
 ```
 ground_distance = max_considered_altitude / tan(min_elevation_angle)
 bbox_radius = ground_distance + (poll_interval * max_aircraft_speed)
 ```
 
-For example, with a minimum elevation of 1 degree and max altitude of 45,000 feet,
-the ground distance is ~780 km (~420 nm). The margin term accounts for aircraft that
-will enter the aperture before the next poll. The bounding box is the observer position
-expanded by `bbox_radius` in each direction. This is generous; the aperture filter
-handles precision.
+This fallback produces a much larger box. The aperture and range filters handle
+precision in either case.
 
 The fetcher owns rate limiting. OpenSky anonymous access resolves state every 10 seconds
 and has 400 credits/day for the states endpoint. A bounding box <= 25 sq degrees costs
@@ -395,6 +421,10 @@ aperture:
 poll_interval: 30s
 
 sighting_ttl: 60s
+
+max_range_km: 60  # ~35 miles, naked-eye limit for commercial jets in clear weather
+min_alt_ft: 150   # suppress aircraft at/near ground level
+min_speed_kt: 50  # suppress taxiing aircraft reporting as airborne
 
 opensky:
   # Omit for anonymous access
