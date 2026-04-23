@@ -43,7 +43,7 @@ func main() {
 	client := opensky.NewClient(cfg.OpenSky.ClientID, cfg.OpenSky.ClientSecret)
 	renderer := render.NewStdout()
 	trk := tracker.New(cfg.Observer, cfg.Aperture, cfg.SightingTTL, cfg.MaxRangeKM, routeDB)
-	trk.SetFilters(cfg.MinAltFt, cfg.MinSpeedKt)
+	trk.SetFilters(cfg.MinAltFt, cfg.MinSpeedKt, cfg.CommercialOnly)
 
 	// Compute bounding box from observer + aperture
 	latMin, lonMin, latMax, lonMax := computeBBox(cfg)

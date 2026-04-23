@@ -31,15 +31,16 @@ type OpenSky struct {
 }
 
 type Config struct {
-	Observer     Observer      `yaml:"observer"`
-	Aperture     Aperture      `yaml:"aperture"`
-	PollInterval time.Duration `yaml:"poll_interval"`
-	SightingTTL  time.Duration `yaml:"sighting_ttl"`
-	MaxRangeKM   float64       `yaml:"max_range_km"`
-	MinAltFt     float64       `yaml:"min_alt_ft"`
-	MinSpeedKt   float64       `yaml:"min_speed_kt"`
-	OpenSky      OpenSky       `yaml:"opensky"`
-	RoutesDir    string        `yaml:"routes_dir"`
+	Observer       Observer      `yaml:"observer"`
+	Aperture       Aperture      `yaml:"aperture"`
+	PollInterval   time.Duration `yaml:"poll_interval"`
+	SightingTTL    time.Duration `yaml:"sighting_ttl"`
+	MaxRangeKM     float64       `yaml:"max_range_km"`
+	MinAltFt       float64       `yaml:"min_alt_ft"`
+	MinSpeedKt     float64       `yaml:"min_speed_kt"`
+	CommercialOnly bool          `yaml:"commercial_only"`
+	OpenSky        OpenSky       `yaml:"opensky"`
+	RoutesDir      string        `yaml:"routes_dir"`
 }
 
 func Load(path string) (*Config, error) {

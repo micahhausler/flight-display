@@ -26,7 +26,7 @@ func (s *Stdout) Render(event model.Event) {
 	}
 
 	callsign := *event.Sighting.Aircraft.Callsign
-	routeStr := event.Sighting.Route.String()
+	routeStr := displayRoute(event.Sighting.Route)
 
 	switch event.Kind {
 	case model.Enter:
@@ -34,20 +34,23 @@ func (s *Stdout) Render(event model.Event) {
 		if event.Sighting.Aircraft.AltFt != nil {
 			alt = fmt.Sprintf("%dft", int(*event.Sighting.Aircraft.AltFt))
 		}
-		if routeStr != "" {
-			fmt.Printf("+ %-8s %-7s %7s\n", callsign, routeStr, alt)
-		} else {
-			fmt.Printf("+ %-8s         %7s\n", callsign, alt)
-		}
+		// Fixed columns: callsign(8) + route(12) + alt(7, right-aligned)
+		fmt.Printf("+ %-8s %-12s %7s\n", callsign, routeStr, alt)
 
 	case model.Leave:
-		if routeStr != "" {
-			fmt.Printf("- %-8s %s\n", callsign, routeStr)
-		} else {
-			fmt.Printf("- %s\n", callsign)
-		}
+		fmt.Printf("- %-8s %s\n", callsign, routeStr)
 
 	case model.Update:
 		// V1: suppress update events
 	}
+}
+
+// displayRoute returns the last leg of a route for display (e.g., "SEA-BNA").
+// Multi-leg routes like SEA-RDM-SEA are trimmed to the final segment (RDM-SEA).
+func displayRoute(r *model.Route) string {
+	if r == nil || len(r.Airports) < 2 {
+		return ""
+	}
+	n := len(r.Airports)
+	return r.Airports[n-2] + "-" + r.Airports[n-1]
 }

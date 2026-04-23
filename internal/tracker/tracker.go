@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"math"
+	"regexp"
 	"time"
 
 	"github.com/micahhausler/flight-display/internal/config"
@@ -15,15 +16,21 @@ const (
 	bearingChangeThreshold = 5.0   // degrees
 )
 
+// airlineCallsignRe matches ICAO airline callsigns: 2-3 letter code followed by
+// digits with optional letter suffix (e.g. DAL1714, SKW112J, ASA95).
+// Rejects registration numbers like N724KP, CFUEI, G-ABCD.
+var airlineCallsignRe = regexp.MustCompile(`^[A-Z]{2,3}\d+[A-Z]{0,2}$`)
+
 // Tracker maintains the set of active sightings and emits events.
 type Tracker struct {
-	observer   config.Observer
-	aperture   config.Aperture
-	ttl        time.Duration
-	maxRangeM  float64
-	minAltFt   float64
-	minSpeedKt float64
-	routeDB    *route.DB
+	observer       config.Observer
+	aperture       config.Aperture
+	ttl            time.Duration
+	maxRangeM      float64
+	minAltFt       float64
+	minSpeedKt     float64
+	commercialOnly bool
+	routeDB        *route.DB
 
 	active map[string]*model.Sighting // keyed by ICAO24
 }
@@ -40,10 +47,11 @@ func New(obs config.Observer, ap config.Aperture, ttl time.Duration, maxRangeKM 
 	}
 }
 
-// SetFilters configures minimum altitude and speed filters.
-func (t *Tracker) SetFilters(minAltFt, minSpeedKt float64) {
+// SetFilters configures minimum altitude, speed, and commercial-only filters.
+func (t *Tracker) SetFilters(minAltFt, minSpeedKt float64, commercialOnly bool) {
 	t.minAltFt = minAltFt
 	t.minSpeedKt = minSpeedKt
+	t.commercialOnly = commercialOnly
 }
 
 // Process takes a batch of aircraft from a poll and returns events.
@@ -59,6 +67,9 @@ func (t *Tracker) Process(aircraft []model.Aircraft) []model.Event {
 			continue
 		}
 		if t.minSpeedKt > 0 && (ac.VelocityKt == nil || *ac.VelocityKt < t.minSpeedKt) {
+			continue
+		}
+		if t.commercialOnly && (ac.Callsign == nil || !airlineCallsignRe.MatchString(*ac.Callsign)) {
 			continue
 		}
 

@@ -21,6 +21,7 @@ sighting_ttl: 60s
 max_range_km: 60  # ~35 miles, reasonable naked-eye limit for commercial jets
 min_alt_ft: 150   # suppress aircraft at/near ground level
 min_speed_kt: 50  # suppress taxiing aircraft reporting as airborne
+commercial_only: false  # true to show only airline callsigns (filters GA N-numbers)
 
 # routes_dir: data/routes
 
