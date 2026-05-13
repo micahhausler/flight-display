@@ -57,7 +57,7 @@ func TestLookupRoute(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClientWithBaseURL("test-key", srv.URL)
-	route, err := client.LookupRoute("UAL2101")
+	route, displayCS, err := client.LookupRoute("UAL2101")
 	if err != nil {
 		t.Fatalf("LookupRoute() error: %v", err)
 	}
@@ -73,6 +73,51 @@ func TestLookupRoute(t *testing.T) {
 	if route.Airports[1] != "SFO" {
 		t.Errorf("destination = %q, want SFO", route.Airports[1])
 	}
+	// ident matches queried callsign — no display callsign enrichment
+	if displayCS != nil {
+		t.Errorf("expected nil displayCallsign when ident matches query, got %q", *displayCS)
+	}
+}
+
+func TestLookupRouteCodeshare(t *testing.T) {
+	// SkyWest operating as United: query SKW5123, response ident is UAL1234
+	response := `{
+		"flights": [
+			{
+				"ident": "UAL1234",
+				"ident_icao": "UAL1234",
+				"origin": {"code_iata": "SEA"},
+				"destination": {"code_iata": "SFO"},
+				"actual_off": "2026-05-13T14:00:00Z",
+				"actual_on": null
+			}
+		]
+	}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(response))
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL("test-key", srv.URL)
+	route, displayCS, err := client.LookupRoute("SKW5123")
+	if err != nil {
+		t.Fatalf("LookupRoute() error: %v", err)
+	}
+	if route == nil {
+		t.Fatal("expected route, got nil")
+	}
+	if route.Airports[0] != "SEA" || route.Airports[1] != "SFO" {
+		t.Errorf("route = %v, want [SEA SFO]", route.Airports)
+	}
+	// ident differs from queried callsign — should get display callsign
+	if displayCS == nil {
+		t.Fatal("expected displayCallsign for codeshare, got nil")
+	}
+	if *displayCS != "UAL1234" {
+		t.Errorf("displayCallsign = %q, want UAL1234", *displayCS)
+	}
 }
 
 func TestLookupRouteNotFound(t *testing.T) {
@@ -82,12 +127,15 @@ func TestLookupRouteNotFound(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClientWithBaseURL("test-key", srv.URL)
-	route, err := client.LookupRoute("N12345")
+	route, displayCS, err := client.LookupRoute("N12345")
 	if err != nil {
 		t.Fatalf("expected nil error for 404, got: %v", err)
 	}
 	if route != nil {
 		t.Fatalf("expected nil route for 404, got %v", route)
+	}
+	if displayCS != nil {
+		t.Fatalf("expected nil displayCallsign for 404, got %v", *displayCS)
 	}
 }
 
@@ -99,12 +147,15 @@ func TestLookupRouteEmptyFlights(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClientWithBaseURL("test-key", srv.URL)
-	route, err := client.LookupRoute("GHOST1")
+	route, displayCS, err := client.LookupRoute("GHOST1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if route != nil {
 		t.Fatalf("expected nil route for empty flights, got %v", route)
+	}
+	if displayCS != nil {
+		t.Fatalf("expected nil displayCallsign for empty flights, got %v", *displayCS)
 	}
 }
 
@@ -116,7 +167,7 @@ func TestLookupRouteAPIError(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClientWithBaseURL("test-key", srv.URL)
-	_, err := client.LookupRoute("UAL1")
+	_, _, err := client.LookupRoute("UAL1")
 	if err == nil {
 		t.Fatal("expected error for 500, got nil")
 	}
@@ -150,7 +201,7 @@ func TestLookupPrefersInFlight(t *testing.T) {
 	defer srv.Close()
 
 	client := NewClientWithBaseURL("test-key", srv.URL)
-	route, err := client.LookupRoute("ASA375")
+	route, _, err := client.LookupRoute("ASA375")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -179,24 +230,24 @@ func TestCacheDiskPersistence(t *testing.T) {
 	cache := NewCache(client, cachePath)
 
 	// First lookup — should call API
-	route, err := cache.Lookup("DAL100")
+	info, err := cache.Lookup("DAL100")
 	if err != nil {
 		t.Fatalf("first lookup error: %v", err)
 	}
-	if route == nil || route.Airports[1] != "ATL" {
-		t.Fatalf("first lookup: expected SEA-ATL, got %v", route)
+	if info == nil || info.Route == nil || info.Route.Airports[1] != "ATL" {
+		t.Fatalf("first lookup: expected SEA-ATL, got %v", info)
 	}
 	if callCount != 1 {
 		t.Fatalf("expected 1 API call, got %d", callCount)
 	}
 
 	// Second lookup — should hit cache, no API call
-	route, err = cache.Lookup("DAL100")
+	info, err = cache.Lookup("DAL100")
 	if err != nil {
 		t.Fatalf("second lookup error: %v", err)
 	}
-	if route == nil || route.Airports[1] != "ATL" {
-		t.Fatalf("second lookup: expected SEA-ATL, got %v", route)
+	if info == nil || info.Route == nil || info.Route.Airports[1] != "ATL" {
+		t.Fatalf("second lookup: expected SEA-ATL, got %v", info)
 	}
 	if callCount != 1 {
 		t.Fatalf("expected still 1 API call after cache hit, got %d", callCount)
@@ -217,15 +268,55 @@ func TestCacheDiskPersistence(t *testing.T) {
 
 	// Create a new cache instance from the same file — should load from disk
 	cache2 := NewCache(client, cachePath)
-	route, err = cache2.Lookup("DAL100")
+	info, err = cache2.Lookup("DAL100")
 	if err != nil {
 		t.Fatalf("cache2 lookup error: %v", err)
 	}
-	if route == nil || route.Airports[1] != "ATL" {
-		t.Fatalf("cache2 lookup: expected SEA-ATL from disk, got %v", route)
+	if info == nil || info.Route == nil || info.Route.Airports[1] != "ATL" {
+		t.Fatalf("cache2 lookup: expected SEA-ATL from disk, got %v", info)
 	}
 	if callCount != 1 {
 		t.Fatalf("expected still 1 API call after disk cache load, got %d", callCount)
+	}
+}
+
+func TestCacheDiskPersistsDisplayCallsign(t *testing.T) {
+	// Verify that the display callsign survives disk persistence
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"flights":[{"ident":"ASA1234","origin":{"code_iata":"SEA"},"destination":{"code_iata":"LAX"},"actual_off":"2026-05-13T10:00:00Z","actual_on":null}]}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "routes.json")
+
+	client := NewClientWithBaseURL("test-key", srv.URL)
+	cache := NewCache(client, cachePath)
+
+	// Lookup a codeshare — SKW5678 resolves to ASA1234
+	info, err := cache.Lookup("SKW5678")
+	if err != nil {
+		t.Fatalf("lookup error: %v", err)
+	}
+	if info == nil || info.Route == nil {
+		t.Fatal("expected route")
+	}
+	if info.DisplayCallsign == nil || *info.DisplayCallsign != "ASA1234" {
+		t.Fatalf("expected displayCallsign ASA1234, got %v", info.DisplayCallsign)
+	}
+
+	// Load from disk in a new cache instance
+	cache2 := NewCache(client, cachePath)
+	info2, err := cache2.Lookup("SKW5678")
+	if err != nil {
+		t.Fatalf("cache2 lookup error: %v", err)
+	}
+	if info2 == nil || info2.Route == nil || info2.Route.Airports[0] != "SEA" {
+		t.Fatalf("expected SEA-LAX from disk cache, got %v", info2)
+	}
+	if info2.DisplayCallsign == nil || *info2.DisplayCallsign != "ASA1234" {
+		t.Fatalf("expected displayCallsign ASA1234 from disk cache, got %v", info2.DisplayCallsign)
 	}
 }
 
@@ -244,24 +335,24 @@ func TestCacheNegativeResult(t *testing.T) {
 	cache := NewCache(client, cachePath)
 
 	// First lookup — API returns 404
-	route, err := cache.Lookup("N12345")
+	info, err := cache.Lookup("N12345")
 	if err != nil {
 		t.Fatalf("first lookup error: %v", err)
 	}
-	if route != nil {
-		t.Fatalf("expected nil route, got %v", route)
+	if info != nil {
+		t.Fatalf("expected nil info, got %v", info)
 	}
 	if callCount != 1 {
 		t.Fatalf("expected 1 API call, got %d", callCount)
 	}
 
 	// Second lookup — should be cached negative, no API call
-	route, err = cache.Lookup("N12345")
+	info, err = cache.Lookup("N12345")
 	if err != nil {
 		t.Fatalf("second lookup error: %v", err)
 	}
-	if route != nil {
-		t.Fatalf("expected nil route from cache, got %v", route)
+	if info != nil {
+		t.Fatalf("expected nil info from cache, got %v", info)
 	}
 	if callCount != 1 {
 		t.Fatalf("expected still 1 API call after negative cache hit, got %d", callCount)
@@ -292,11 +383,11 @@ func TestCacheExpiry(t *testing.T) {
 	cache.mu.Unlock()
 
 	// Lookup should bypass stale cache and call API
-	route, err := cache.Lookup("AAL1")
+	info, err := cache.Lookup("AAL1")
 	if err != nil {
 		t.Fatalf("lookup error: %v", err)
 	}
-	if route == nil {
+	if info == nil || info.Route == nil {
 		t.Fatal("expected route, got nil")
 	}
 	if callCount != 1 {

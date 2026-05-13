@@ -16,7 +16,7 @@ You define your observer position (lat/lon/altitude) and the angular range of yo
 2. **Slant range** — is it close enough to actually see? (default 60 km)
 3. **Altitude and speed** — is it actually flying, not taxiing or parked?
 
-When an aircraft enters your view, it prints a line. When it leaves, it prints another. Route information (e.g., ICN-SEA) comes from the [FlightAware AeroAPI](https://www.flightaware.com/aeroapi/) with a 31-day disk cache.
+When an aircraft enters your view, it prints a line. When it leaves, it prints another. Route information (e.g., ICN-SEA) comes from the [FlightAware AeroAPI](https://www.flightaware.com/aeroapi/) with a 31-day disk cache. For codeshare flights (e.g., SkyWest operating as United), AeroAPI resolves the marketing carrier automatically — you see "UAL1234" instead of "SKW5123".
 
 ## Data sources
 

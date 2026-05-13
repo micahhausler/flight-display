@@ -193,3 +193,114 @@ func TestProcess_BeyondMaxRange(t *testing.T) {
 		t.Errorf("aircraft 20km away should be accepted with 50km max range, got %d enters", enterCount)
 	}
 }
+
+// mockRouteLookup implements RouteLookup for testing.
+type mockRouteLookup struct {
+	info map[string]*model.FlightInfo
+}
+
+func (m *mockRouteLookup) Lookup(callsign string) (*model.FlightInfo, error) {
+	if info, ok := m.info[callsign]; ok {
+		return info, nil
+	}
+	return nil, nil
+}
+
+func TestProcess_DisplayCallsignFromRouteLookup(t *testing.T) {
+	obs := config.Observer{Lat: 47.6115, Lon: -122.347, AltMSLMeter: 55}
+	ap := config.Aperture{
+		Rects: []config.AzElRect{
+			{AzMin: 0, AzMax: 360, ElMin: -90, ElMax: 90}, // full sky
+		},
+	}
+	trk := New(obs, ap, 60*time.Second, 0, nil)
+
+	// Simulate AeroAPI resolving a codeshare: SKW5123 -> UAL1234
+	trk.SetRouteLookup(&mockRouteLookup{
+		info: map[string]*model.FlightInfo{
+			"SKW5123": {
+				Route:           &model.Route{Airports: []string{"SEA", "SFO"}},
+				DisplayCallsign: strp("UAL1234"),
+			},
+		},
+	})
+
+	aircraft := []model.Aircraft{
+		{
+			ICAO24:       "abc123",
+			Callsign:     strp("SKW5123"),
+			Lat:          ptr(47.45),
+			Lon:          ptr(-122.4),
+			AltFt:        ptr(10000.0),
+			OnGround:     false,
+			TimePosition: time.Now(),
+		},
+	}
+
+	events := trk.Process(aircraft)
+	if len(events) != 1 || events[0].Kind != model.Enter {
+		t.Fatalf("expected 1 Enter event, got %d events", len(events))
+	}
+
+	sighting := events[0].Sighting
+	if sighting.DisplayCallsign == nil {
+		t.Fatal("expected DisplayCallsign to be set")
+	}
+	if *sighting.DisplayCallsign != "UAL1234" {
+		t.Errorf("DisplayCallsign = %q, want UAL1234", *sighting.DisplayCallsign)
+	}
+	if sighting.Route == nil || sighting.Route.Airports[1] != "SFO" {
+		t.Errorf("Route = %v, want SEA-SFO", sighting.Route)
+	}
+	// Raw callsign is preserved
+	if *sighting.Aircraft.Callsign != "SKW5123" {
+		t.Errorf("Aircraft.Callsign = %q, want SKW5123 (raw preserved)", *sighting.Aircraft.Callsign)
+	}
+}
+
+func TestProcess_CommercialOnlyFiltersOnRawCallsign(t *testing.T) {
+	// Verifies that commercial_only filter operates on the raw transponder callsign,
+	// not the display callsign. A SkyWest callsign (SKW5123) is a valid airline
+	// callsign and should pass the filter even though it's a regional operator.
+	obs := config.Observer{Lat: 47.6115, Lon: -122.347, AltMSLMeter: 55}
+	ap := config.Aperture{
+		Rects: []config.AzElRect{
+			{AzMin: 0, AzMax: 360, ElMin: -90, ElMax: 90}, // full sky
+		},
+	}
+	trk := New(obs, ap, 60*time.Second, 0, nil)
+	trk.SetFilters(0, 0, true) // commercial_only = true
+
+	trk.SetRouteLookup(&mockRouteLookup{
+		info: map[string]*model.FlightInfo{
+			"SKW5123": {
+				Route:           &model.Route{Airports: []string{"SEA", "SFO"}},
+				DisplayCallsign: strp("UAL1234"),
+			},
+		},
+	})
+
+	aircraft := []model.Aircraft{
+		{
+			ICAO24:       "abc123",
+			Callsign:     strp("SKW5123"), // valid airline callsign — passes filter
+			Lat:          ptr(47.45),
+			Lon:          ptr(-122.4),
+			AltFt:        ptr(10000.0),
+			VelocityKt:   ptr(250.0),
+			OnGround:     false,
+			TimePosition: time.Now(),
+		},
+	}
+
+	events := trk.Process(aircraft)
+	enterCount := 0
+	for _, e := range events {
+		if e.Kind == model.Enter {
+			enterCount++
+		}
+	}
+	if enterCount != 1 {
+		t.Errorf("SKW5123 should pass commercial_only filter (valid airline callsign), got %d enters", enterCount)
+	}
+}

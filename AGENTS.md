@@ -27,7 +27,7 @@ Route lookup happens synchronously in the tracker on Enter events.
 
 - `fetch.Fetcher` — `Fetch() ([]Aircraft, error)` + `MinInterval() time.Duration`
 - `render.Renderer` — `Render(event model.Event)`
-- `tracker.RouteLookup` — `Lookup(callsign string) (*model.Route, error)`
+- `tracker.RouteLookup` — `Lookup(callsign string) (*model.FlightInfo, error)`
 
 ## Packages
 

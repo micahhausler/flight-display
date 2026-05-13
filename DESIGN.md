@@ -188,16 +188,34 @@ type Route struct {
 }
 ```
 
+The AeroAPI response also provides the resolved flight identity (`ident` field).
+For codeshare flights operated by regional carriers — e.g., SkyWest (SKW) operating
+as United (UAL), Alaska (ASA), or Delta (DAL) — the response's `ident` is the
+marketing carrier designator, not the operating carrier. The system captures this as
+a display callsign when it differs from the queried (transponder) callsign.
+
+```go
+type FlightInfo struct {
+    Route           *Route  // origin/destination airports; nil if unknown
+    DisplayCallsign *string // marketing carrier ident (e.g. "ASA1234" for a SKW codeshare); nil = use raw callsign
+}
+```
+
+The display callsign comparison uses case-insensitive matching with trimmed whitespace
+to handle any normalization differences between AeroAPI and transponder callsigns.
+When the response `ident` matches the queried callsign (non-codeshare flights),
+`DisplayCallsign` is nil and the raw transponder callsign is used for display.
+
 The AeroAPI lookup is backed by a disk-persisted cache with a 31-day TTL. The cache
-stores both positive results (callsign → route) and negative results (callsign → nil,
-meaning "we checked, no route exists"). This prevents repeated API calls for GA tail
-numbers that will never have a route.
+stores both positive results (callsign → route + display callsign) and negative
+results (callsign → nil, meaning "we checked, no data exists"). This prevents
+repeated API calls for GA tail numbers that will never have a route.
 
 Cache behavior:
 - On Enter, check cache for callsign.
 - Cache hit (< 31 days old): use cached result. No API call.
 - Cache miss or stale: call AeroAPI, store result to disk, use it.
-- API error: fall back to VRS static database if configured.
+- API error: fall back to VRS static database if configured (no display callsign from VRS).
 
 The cache is a single JSON file at `~/.cache/flight-display/routes.json`. It is
 loaded at startup and written on each new entry. The dataset is small (a few hundred
@@ -211,18 +229,19 @@ is under $1/month. A PiAware ADS-B feeder gets $10/month in free API credit.
 A fallback route source — the Virtual Radar Server (VRS) standing data — can be
 configured via `routes_dir`. When an AeroAPI key is configured, it takes precedence;
 VRS is only consulted on API failure. When no AeroAPI key is configured, VRS is used
-directly as before.
+directly as before. VRS provides routes only — no display callsign resolution.
 
-The Sighting struct carries the optional route:
+The Sighting struct carries both the optional route and display callsign:
 
 ```go
 type Sighting struct {
-    Aircraft     Aircraft
-    Route        *Route    // nil if no route found in any source
-    BearingDeg   float64
-    ElevationDeg float64
-    FirstSeen    time.Time
-    LastPosition time.Time
+    Aircraft        Aircraft
+    Route           *Route    // nil if no route found in any source
+    DisplayCallsign *string   // marketing carrier ident; nil = use Aircraft.Callsign
+    BearingDeg      float64
+    ElevationDeg    float64
+    FirstSeen       time.Time
+    LastPosition    time.Time
 }
 ```
 
@@ -236,10 +255,18 @@ The STDOUT renderer prints one line per Enter event:
 + N172SP             5400ft
 ```
 
+For codeshare flights (regional operators like SkyWest flying as a major carrier),
+the display shows the marketing carrier callsign when AeroAPI resolves it:
+
+```
++ UAL1234  SEA-SFO   8200ft   (transponder: SKW5123, displayed as UAL1234)
+```
+
 Fields:
 - **`+`** prefix indicates entry. `-` prefix indicates leave.
-- **Callsign** (left-aligned, padded to 8 chars). If callsign is nil, the aircraft is
-  suppressed — a row with no identifier is noise for the ambient display use case.
+- **Callsign** (left-aligned, padded to 8 chars). Uses `DisplayCallsign` when
+  available (codeshare resolution from AeroAPI), otherwise `Aircraft.Callsign`.
+  If both are nil, the aircraft is suppressed.
 - **Route** (IATA airport codes, hyphen-separated). Blank if not in route database.
 - **Altitude** in feet, no decimal.
 

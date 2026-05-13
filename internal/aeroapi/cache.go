@@ -15,8 +15,9 @@ const cacheTTL = 31 * 24 * time.Hour
 
 // cacheEntry stores a route lookup result (including negative results).
 type cacheEntry struct {
-	Route     *model.Route `json:"route"`      // nil means "looked up, no route found"
-	FetchedAt time.Time    `json:"fetched_at"`
+	Route           *model.Route `json:"route"`            // nil means "looked up, no route found"
+	DisplayCallsign *string      `json:"display_callsign"` // marketing carrier ident if different from queried callsign
+	FetchedAt       time.Time    `json:"fetched_at"`
 }
 
 // Cache provides a disk-backed route lookup cache fronting the AeroAPI client.
@@ -40,20 +41,26 @@ func NewCache(client *Client, path string) *Cache {
 	return c
 }
 
-// Lookup returns the route for a callsign. Checks disk cache first, calls AeroAPI on miss.
+// Lookup returns flight info for a callsign. Checks disk cache first, calls AeroAPI on miss.
 // Returns nil, nil for a cached or fresh negative result (no route exists for this callsign).
 // Returns nil, error only on API failures.
-func (c *Cache) Lookup(callsign string) (*model.Route, error) {
+func (c *Cache) Lookup(callsign string) (*model.FlightInfo, error) {
 	c.mu.Lock()
 	entry, ok := c.entries[callsign]
 	c.mu.Unlock()
 
 	if ok && time.Since(entry.FetchedAt) < cacheTTL {
-		return entry.Route, nil
+		if entry.Route == nil && entry.DisplayCallsign == nil {
+			return nil, nil // cached negative result
+		}
+		return &model.FlightInfo{
+			Route:           entry.Route,
+			DisplayCallsign: entry.DisplayCallsign,
+		}, nil
 	}
 
 	// Cache miss or stale — call the API
-	route, err := c.client.LookupRoute(callsign)
+	route, displayCS, err := c.client.LookupRoute(callsign)
 	if err != nil {
 		return nil, err
 	}
@@ -61,13 +68,21 @@ func (c *Cache) Lookup(callsign string) (*model.Route, error) {
 	// Store result (including nil for negative cache)
 	c.mu.Lock()
 	c.entries[callsign] = cacheEntry{
-		Route:     route,
-		FetchedAt: time.Now(),
+		Route:           route,
+		DisplayCallsign: displayCS,
+		FetchedAt:       time.Now(),
 	}
 	c.mu.Unlock()
 
 	c.save()
-	return route, nil
+
+	if route == nil && displayCS == nil {
+		return nil, nil
+	}
+	return &model.FlightInfo{
+		Route:           route,
+		DisplayCallsign: displayCS,
+	}, nil
 }
 
 // load reads the cache file from disk. If the file doesn't exist or is invalid, starts empty.

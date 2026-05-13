@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/micahhausler/flight-display/internal/model"
@@ -59,13 +60,14 @@ func NewClientWithBaseURL(apiKey, baseURL string) *Client {
 }
 
 // LookupRoute queries AeroAPI for the route of the given callsign.
-// Returns nil, nil if no route is found (not an error — just no data).
-func (c *Client) LookupRoute(callsign string) (*model.Route, error) {
+// Returns the route and the resolved display callsign (marketing carrier ident).
+// Returns nil, nil, nil if no route is found (not an error — just no data).
+func (c *Client) LookupRoute(callsign string) (*model.Route, *string, error) {
 	endpoint := fmt.Sprintf("%s/flights/%s", c.baseURL, url.PathEscape(callsign))
 
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("x-apikey", c.apiKey)
 
@@ -76,41 +78,43 @@ func (c *Client) LookupRoute(callsign string) (*model.Route, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("aeroapi request: %w", err)
+		return nil, nil, fmt.Errorf("aeroapi request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil // no such flight — not an error
+		return nil, nil, nil // no such flight — not an error
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("aeroapi returned %d: %s", resp.StatusCode, string(body))
+		return nil, nil, fmt.Errorf("aeroapi returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var data flightsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("decoding aeroapi response: %w", err)
+		return nil, nil, fmt.Errorf("decoding aeroapi response: %w", err)
 	}
 
 	// Find the most relevant flight (prefer one that is currently active / most recent)
-	route := extractRoute(data.Flights)
-	return route, nil
+	route, displayCS := extractRoute(data.Flights, callsign)
+	return route, displayCS, nil
 }
 
-// extractRoute picks the best flight from the response and returns its route.
+// extractRoute picks the best flight from the response and returns its route
+// and display callsign. The display callsign is the ident from the AeroAPI response
+// when it differs from the queried callsign (i.e., a codeshare resolution).
 // Prefers flights that have departed but not arrived (in-flight), then most recent.
-func extractRoute(flights []flight) *model.Route {
+func extractRoute(flights []flight, queriedCallsign string) (*model.Route, *string) {
 	if len(flights) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Find an in-flight entry (has actual_off, no actual_on)
 	for _, f := range flights {
 		if f.ActualOff != nil && f.ActualOn == nil {
 			if r := routeFromFlight(f); r != nil {
-				return r
+				return r, displayCallsignFromFlight(f, queriedCallsign)
 			}
 		}
 	}
@@ -118,11 +122,24 @@ func extractRoute(flights []flight) *model.Route {
 	// Fall back to the first flight with origin/destination
 	for _, f := range flights {
 		if r := routeFromFlight(f); r != nil {
-			return r
+			return r, displayCallsignFromFlight(f, queriedCallsign)
 		}
 	}
 
-	return nil
+	return nil, nil
+}
+
+// displayCallsignFromFlight returns the flight's ident as a display callsign
+// if it differs from the queried callsign (indicating a codeshare resolution).
+// Returns nil if the ident matches the queried callsign (no enrichment needed).
+// Comparison is case-insensitive and ignores leading/trailing whitespace to
+// handle any normalization differences between AeroAPI and transponder callsigns.
+func displayCallsignFromFlight(f flight, queriedCallsign string) *string {
+	ident := strings.TrimSpace(f.Ident)
+	if ident == "" || strings.EqualFold(ident, strings.TrimSpace(queriedCallsign)) {
+		return nil
+	}
+	return &ident
 }
 
 func routeFromFlight(f flight) *model.Route {

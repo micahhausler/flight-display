@@ -17,9 +17,9 @@ const (
 	bearingChangeThreshold = 5.0   // degrees
 )
 
-// RouteLookup provides route information for a callsign.
+// RouteLookup provides flight information (route and display callsign) for a callsign.
 type RouteLookup interface {
-	Lookup(callsign string) (*model.Route, error)
+	Lookup(callsign string) (*model.FlightInfo, error)
 }
 
 // airlineCallsignRe matches ICAO airline callsigns: 2-3 letter code followed by
@@ -112,17 +112,19 @@ func (t *Tracker) Process(aircraft []model.Aircraft) []model.Event {
 		} else {
 			// New sighting
 			var r *model.Route
+			var displayCS *string
 			if ac.Callsign != nil {
-				r = t.lookupRoute(*ac.Callsign)
+				r, displayCS = t.lookupRoute(*ac.Callsign)
 			}
 
 			sighting := &model.Sighting{
-				Aircraft:     ac,
-				Route:        r,
-				BearingDeg:   bearing,
-				ElevationDeg: elevation,
-				FirstSeen:    time.Now(),
-				LastPosition: ac.TimePosition,
+				Aircraft:        ac,
+				Route:           r,
+				DisplayCallsign: displayCS,
+				BearingDeg:      bearing,
+				ElevationDeg:    elevation,
+				FirstSeen:       time.Now(),
+				LastPosition:    ac.TimePosition,
 			}
 			t.active[ac.ICAO24] = sighting
 			events = append(events, model.Event{
@@ -224,14 +226,18 @@ func (t *Tracker) materialChange(s *model.Sighting, newBearing, newElevation flo
 }
 
 // lookupRoute tries the live route source first (AeroAPI), falls back to VRS.
-func (t *Tracker) lookupRoute(callsign string) *model.Route {
+// Returns both the route and an optional display callsign (marketing carrier ident).
+func (t *Tracker) lookupRoute(callsign string) (*model.Route, *string) {
 	if t.routeLookup != nil {
-		r, err := t.routeLookup.Lookup(callsign)
+		info, err := t.routeLookup.Lookup(callsign)
 		if err != nil {
 			log.Printf("Route lookup error for %s: %v (falling back to VRS)", callsign, err)
-			return t.routeDB.Lookup(callsign)
+			return t.routeDB.Lookup(callsign), nil
 		}
-		return r
+		if info != nil {
+			return info.Route, info.DisplayCallsign
+		}
+		return nil, nil
 	}
-	return t.routeDB.Lookup(callsign)
+	return t.routeDB.Lookup(callsign), nil
 }

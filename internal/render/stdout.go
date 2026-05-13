@@ -25,7 +25,11 @@ func (s *Stdout) Render(event model.Event) {
 		return
 	}
 
+	// Prefer the marketing carrier ident when available (codeshare resolution)
 	callsign := *event.Sighting.Aircraft.Callsign
+	if event.Sighting.DisplayCallsign != nil {
+		callsign = *event.Sighting.DisplayCallsign
+	}
 	routeStr := displayRoute(event.Sighting.Route)
 
 	switch event.Kind {
