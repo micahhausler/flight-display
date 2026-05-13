@@ -80,12 +80,13 @@ func TestLookupRoute(t *testing.T) {
 }
 
 func TestLookupRouteCodeshare(t *testing.T) {
-	// SkyWest operating as United: query SKW5123, response ident is UAL1234
+	// SkyWest operating as United: query SKW5123, response has codeshares with UAL5123
 	response := `{
 		"flights": [
 			{
-				"ident": "UAL1234",
-				"ident_icao": "UAL1234",
+				"ident": "SKW5123",
+				"ident_icao": "SKW5123",
+				"codeshares": ["UAL5123"],
 				"origin": {"code_iata": "SEA"},
 				"destination": {"code_iata": "SFO"},
 				"actual_off": "2026-05-13T14:00:00Z",
@@ -111,12 +112,84 @@ func TestLookupRouteCodeshare(t *testing.T) {
 	if route.Airports[0] != "SEA" || route.Airports[1] != "SFO" {
 		t.Errorf("route = %v, want [SEA SFO]", route.Airports)
 	}
-	// ident differs from queried callsign — should get display callsign
 	if displayCS == nil {
 		t.Fatal("expected displayCallsign for codeshare, got nil")
 	}
-	if *displayCS != "UAL1234" {
-		t.Errorf("displayCallsign = %q, want UAL1234", *displayCS)
+	if *displayCS != "UAL5123" {
+		t.Errorf("displayCallsign = %q, want UAL5123", *displayCS)
+	}
+}
+
+func TestLookupRouteCodeshareMultiple(t *testing.T) {
+	// SKW3113 with multiple codeshares — ASA3113 shares flight number, others don't.
+	// Should select ASA3113 (preferred carrier with matching flight number).
+	response := `{
+		"flights": [
+			{
+				"ident": "SKW3113",
+				"ident_icao": "SKW3113",
+				"codeshares": ["THT2309", "QTR2012", "ICE7624", "CFG5026", "ASA3113"],
+				"origin": {"code_iata": "LAX"},
+				"destination": {"code_iata": "SEA"},
+				"actual_off": "2026-05-13T17:32:00Z",
+				"actual_on": null
+			}
+		]
+	}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(response))
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL("test-key", srv.URL)
+	route, displayCS, err := client.LookupRoute("SKW3113")
+	if err != nil {
+		t.Fatalf("LookupRoute() error: %v", err)
+	}
+	if route == nil {
+		t.Fatal("expected route, got nil")
+	}
+	if displayCS == nil {
+		t.Fatal("expected displayCallsign for codeshare, got nil")
+	}
+	if *displayCS != "ASA3113" {
+		t.Errorf("displayCallsign = %q, want ASA3113 (preferred carrier with matching flight number)", *displayCS)
+	}
+}
+
+func TestLookupRouteMainlineNoRewrite(t *testing.T) {
+	// UAL1234 operated by United with Copa as a partner codeshare (different flight number).
+	// Should NOT rewrite — this is a mainline flight, not a regional codeshare.
+	response := `{
+		"flights": [
+			{
+				"ident": "UAL1234",
+				"ident_icao": "UAL1234",
+				"codeshares": ["CMP1205"],
+				"origin": {"code_iata": "SEA"},
+				"destination": {"code_iata": "SFO"},
+				"actual_off": "2026-05-13T14:00:00Z",
+				"actual_on": null
+			}
+		]
+	}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(response))
+	}))
+	defer srv.Close()
+
+	client := NewClientWithBaseURL("test-key", srv.URL)
+	_, displayCS, err := client.LookupRoute("UAL1234")
+	if err != nil {
+		t.Fatalf("LookupRoute() error: %v", err)
+	}
+	// Copa's flight number (1205) differs from United's (1234) — no rewrite
+	if displayCS != nil {
+		t.Errorf("expected nil displayCallsign for mainline flight, got %q", *displayCS)
 	}
 }
 
@@ -284,7 +357,7 @@ func TestCacheDiskPersistsDisplayCallsign(t *testing.T) {
 	// Verify that the display callsign survives disk persistence
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"flights":[{"ident":"ASA1234","origin":{"code_iata":"SEA"},"destination":{"code_iata":"LAX"},"actual_off":"2026-05-13T10:00:00Z","actual_on":null}]}`))
+		w.Write([]byte(`{"flights":[{"ident":"SKW5678","codeshares":["ASA5678"],"origin":{"code_iata":"SEA"},"destination":{"code_iata":"LAX"},"actual_off":"2026-05-13T10:00:00Z","actual_on":null}]}`))
 	}))
 	defer srv.Close()
 
@@ -294,7 +367,7 @@ func TestCacheDiskPersistsDisplayCallsign(t *testing.T) {
 	client := NewClientWithBaseURL("test-key", srv.URL)
 	cache := NewCache(client, cachePath)
 
-	// Lookup a codeshare — SKW5678 resolves to ASA1234
+	// Lookup a codeshare — SKW5678 resolves to ASA5678
 	info, err := cache.Lookup("SKW5678")
 	if err != nil {
 		t.Fatalf("lookup error: %v", err)
@@ -302,8 +375,8 @@ func TestCacheDiskPersistsDisplayCallsign(t *testing.T) {
 	if info == nil || info.Route == nil {
 		t.Fatal("expected route")
 	}
-	if info.DisplayCallsign == nil || *info.DisplayCallsign != "ASA1234" {
-		t.Fatalf("expected displayCallsign ASA1234, got %v", info.DisplayCallsign)
+	if info.DisplayCallsign == nil || *info.DisplayCallsign != "ASA5678" {
+		t.Fatalf("expected displayCallsign ASA5678, got %v", info.DisplayCallsign)
 	}
 
 	// Load from disk in a new cache instance
@@ -315,8 +388,8 @@ func TestCacheDiskPersistsDisplayCallsign(t *testing.T) {
 	if info2 == nil || info2.Route == nil || info2.Route.Airports[0] != "SEA" {
 		t.Fatalf("expected SEA-LAX from disk cache, got %v", info2)
 	}
-	if info2.DisplayCallsign == nil || *info2.DisplayCallsign != "ASA1234" {
-		t.Fatalf("expected displayCallsign ASA1234 from disk cache, got %v", info2.DisplayCallsign)
+	if info2.DisplayCallsign == nil || *info2.DisplayCallsign != "ASA5678" {
+		t.Fatalf("expected displayCallsign ASA5678 from disk cache, got %v", info2.DisplayCallsign)
 	}
 }
 

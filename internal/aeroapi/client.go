@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,6 +23,7 @@ type flightsResponse struct {
 type flight struct {
 	Ident       string      `json:"ident"`
 	IdentICAO   *string     `json:"ident_icao"`
+	Codeshares  []string    `json:"codeshares"`
 	Origin      *airportRef `json:"origin"`
 	Destination *airportRef `json:"destination"`
 	ActualOff   *string     `json:"actual_off"`
@@ -129,17 +131,91 @@ func extractRoute(flights []flight, queriedCallsign string) (*model.Route, *stri
 	return nil, nil
 }
 
-// displayCallsignFromFlight returns the flight's ident as a display callsign
-// if it differs from the queried callsign (indicating a codeshare resolution).
-// Returns nil if the ident matches the queried callsign (no enrichment needed).
-// Comparison is case-insensitive and ignores leading/trailing whitespace to
-// handle any normalization differences between AeroAPI and transponder callsigns.
+// preferredCarriers is the priority order for selecting a marketing carrier
+// from multiple codeshares that share the same flight number. Major US carriers
+// are listed first since regional operators (SkyWest, Republic, Envoy, etc.)
+// primarily fly under these brands.
+var preferredCarriers = []string{"DAL", "ASA", "UAL", "AAL"}
+
+// displayCallsignFromFlight resolves the marketing carrier callsign for a
+// codeshare flight. Regional operators (e.g., SkyWest/SKW) broadcast their
+// operating callsign on the transponder, but the meaningful identity for
+// display is the marketing carrier (e.g., "ASA3113" for Alaska Air).
+//
+// Resolution logic:
+//  1. Find codeshares sharing the same flight number as the queried callsign
+//     (e.g., SKW3113 → ASA3113). This distinguishes brand-replacement codeshares
+//     from interline partner codeshares (which use different flight numbers).
+//  2. Among matches, prefer major US carriers (DAL, ASA, UAL, AAL) in priority order.
+//  3. If no preferred carrier matches, use the first match.
+//  4. Returns nil if no codeshares exist or none share the flight number
+//     (i.e., this is a mainline flight, not a regional codeshare).
 func displayCallsignFromFlight(f flight, queriedCallsign string) *string {
-	ident := strings.TrimSpace(f.Ident)
-	if ident == "" || strings.EqualFold(ident, strings.TrimSpace(queriedCallsign)) {
+	if len(f.Codeshares) == 0 {
 		return nil
 	}
-	return &ident
+
+	queryNum := flightNumber(queriedCallsign)
+	if queryNum == "" {
+		return nil
+	}
+
+	// Collect codeshares with matching flight number but different airline prefix
+	var matches []string
+	queryPrefix := airlinePrefix(queriedCallsign)
+	for _, cs := range f.Codeshares {
+		csNum := flightNumber(cs)
+		csPrefix := airlinePrefix(cs)
+		if csNum == queryNum && !strings.EqualFold(csPrefix, queryPrefix) {
+			matches = append(matches, cs)
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil
+	}
+
+	if len(matches) > 1 {
+		log.Printf("Multiple codeshares match flight number %s for %s: %v", queryNum, queriedCallsign, matches)
+	}
+
+	// Prefer major US carriers in priority order
+	for _, preferred := range preferredCarriers {
+		for _, m := range matches {
+			if strings.EqualFold(airlinePrefix(m), preferred) {
+				return &m
+			}
+		}
+	}
+
+	// No preferred carrier found — use first match
+	match := matches[0]
+	return &match
+}
+
+// flightNumber extracts the numeric portion (with optional trailing alpha suffix)
+// from an ICAO callsign. E.g., "SKW3113" → "3113", "DAL1921" → "1921".
+func flightNumber(callsign string) string {
+	cs := strings.TrimSpace(callsign)
+	// Find where digits start (skip 2-3 letter airline prefix)
+	for i, c := range cs {
+		if c >= '0' && c <= '9' {
+			return cs[i:]
+		}
+	}
+	return ""
+}
+
+// airlinePrefix extracts the 2-3 letter ICAO airline code from a callsign.
+// E.g., "SKW3113" → "SKW", "DAL1921" → "DAL".
+func airlinePrefix(callsign string) string {
+	cs := strings.TrimSpace(callsign)
+	for i, c := range cs {
+		if c >= '0' && c <= '9' {
+			return cs[:i]
+		}
+	}
+	return cs
 }
 
 func routeFromFlight(f flight) *model.Route {
