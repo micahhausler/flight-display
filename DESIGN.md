@@ -401,8 +401,25 @@ The top-level orchestrator. Pseudocode:
 
 ```
 interval = max(config.poll_interval, fetcher.MinInterval())
+wasQuiet = false
+lastClockMinute = -1
 
 every <interval>:
+    now = time.Now()
+    if inQuietHours(now, config.quiet_hours):
+        if !wasQuiet:
+            // Transition into quiet hours: emit Leave for all, clear tracker
+            leaveEvents = tracker.Clear()
+            for event in leaveEvents:
+                renderer.Render(event)
+            wasQuiet = true
+            lastClockMinute = -1
+        if now.Minute() != lastClockMinute:
+            print("🌙 " + now.Format("15:04"))
+            lastClockMinute = now.Minute()
+        continue
+    if wasQuiet:
+        wasQuiet = false
     aircraft, err = fetcher.Fetch()
     if err:
         log error
@@ -418,7 +435,8 @@ every <interval>:
 ```
 
 The poll loop does not know about OpenSky, ADS-B, visibility math, or display
-formatting.
+formatting. Quiet hours is a time-based policy that belongs to the orchestrator —
+it suppresses polling entirely rather than filtering results.
 
 ### Failure Semantics
 
@@ -475,6 +493,10 @@ aeroapi:
   key: ""  # FlightAware AeroAPI key; omit to use VRS database
   # cache_path: ~/.cache/flight-display/routes.json  # default
 
+quiet_hours:
+  # sun: { start: "00:00", end: "06:30" }
+  # mon: { start: "22:00", end: "06:00" }
+
 # opensky:
 #   client_id: ""
 #   client_secret: ""
@@ -490,6 +512,35 @@ disk cache. When empty, routes come from the VRS static database (configured via
 
 Negative elevation minimum allows for aircraft below the observer's altitude (e.g.,
 low approaches to SEA visible from an elevated vantage point).
+
+### Quiet Hours
+
+Optional per-day-of-week schedule that suppresses polling and displays a clock instead.
+Useful for nighttime when the display's output is unwanted.
+
+```yaml
+quiet_hours:
+  sun: { start: "00:00", end: "06:30" }
+  mon: { start: "22:00", end: "06:00" }
+  tue: { start: "22:00", end: "06:00" }
+  wed: { start: "22:00", end: "06:00" }
+  thu: { start: "22:00", end: "06:00" }
+  fri: { start: "23:00", end: "07:00" }
+  sat: { start: "23:00", end: "07:00" }
+```
+
+Each key is a three-letter day abbreviation (`sun`/`mon`/`tue`/`wed`/`thu`/`fri`/`sat`).
+Values are `{start, end}` in `HH:MM` 24-hour format. A window belongs to its start day:
+`mon: {start: "22:00", end: "06:00"}` means Monday 22:00 through Tuesday 06:00.
+Days without an entry have no quiet hours. Omitting `quiet_hours` entirely disables
+the feature.
+
+Behavior on entry:
+1. All active sightings emit Leave events (tracker is cleared).
+2. Display prints `🌙 HH:MM` once per minute.
+3. No fetcher calls are made — zero API cost during quiet hours.
+
+On exit, polling resumes immediately with a fresh tracker state.
 
 ### Aperture Calibration
 
@@ -520,6 +571,7 @@ flight-display/
       cache.go         # Disk-backed 31-day route cache
     config/
       config.go        # YAML config parsing
+      quiet.go         # Quiet hours predicate and time-window logic
     fetch/
       fetcher.go       # Fetcher interface definition
     geo/

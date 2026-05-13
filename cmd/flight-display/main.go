@@ -76,20 +76,62 @@ func main() {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
+	if len(cfg.QuietHours) > 0 {
+		log.Printf("Quiet hours configured for %d days", len(cfg.QuietHours))
+	}
+
 	log.Println("Starting flight display...")
 
-	// Do an immediate first poll
-	poll(fetcher, trk, renderer)
+	// Quiet hours state
+	wasQuiet := false
+	lastClockMinute := -1
+
+	// Do an immediate first tick
+	now := time.Now()
+	if config.InQuietHours(now, cfg.QuietHours) {
+		wasQuiet = true
+		printClock(now)
+		lastClockMinute = now.Minute()
+	} else {
+		poll(fetcher, trk, renderer)
+	}
 
 	for {
 		select {
 		case <-ticker.C:
-			poll(fetcher, trk, renderer)
+			now := time.Now()
+			if config.InQuietHours(now, cfg.QuietHours) {
+				if !wasQuiet {
+					// Transition into quiet hours: clear tracker
+					log.Println("Entering quiet hours")
+					leaveEvents := trk.Clear()
+					for _, event := range leaveEvents {
+						renderer.Render(event)
+					}
+					wasQuiet = true
+					lastClockMinute = -1
+				}
+				// Print clock once per minute
+				if now.Minute() != lastClockMinute {
+					printClock(now)
+					lastClockMinute = now.Minute()
+				}
+			} else {
+				if wasQuiet {
+					log.Println("Quiet hours ended, resuming")
+					wasQuiet = false
+				}
+				poll(fetcher, trk, renderer)
+			}
 		case sig := <-sigCh:
 			log.Printf("Received %v, shutting down", sig)
 			return
 		}
 	}
+}
+
+func printClock(now time.Time) {
+	fmt.Printf("\U0001F319 %s\n", now.Format("15:04"))
 }
 
 func newFetcher(cfg *config.Config) fetch.Fetcher {

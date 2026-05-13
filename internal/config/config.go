@@ -39,6 +39,18 @@ type AeroAPI struct {
 	CachePath string `yaml:"cache_path"` // path to disk cache file
 }
 
+// TimeWindow represents a daily time window with start and end times.
+// If Start > End, the window crosses midnight (e.g., 22:00 to 06:00).
+type TimeWindow struct {
+	Start string `yaml:"start"` // HH:MM in 24-hour format
+	End   string `yaml:"end"`   // HH:MM in 24-hour format
+}
+
+// QuietHours maps day-of-week names to time windows during which polling is suppressed.
+// The window belongs to its start day: {start: "22:00", end: "06:00"} on "mon" means
+// Monday 22:00 through Tuesday 06:00.
+type QuietHours map[string]TimeWindow
+
 type Config struct {
 	Source         string        `yaml:"source"` // "opensky" or "adsb"
 	Observer       Observer      `yaml:"observer"`
@@ -49,6 +61,7 @@ type Config struct {
 	MinAltFt       float64       `yaml:"min_alt_ft"`
 	MinSpeedKt     float64       `yaml:"min_speed_kt"`
 	CommercialOnly bool          `yaml:"commercial_only"`
+	QuietHours     QuietHours    `yaml:"quiet_hours"`
 	OpenSky        OpenSky       `yaml:"opensky"`
 	ADSB           ADSB          `yaml:"adsb"`
 	AeroAPI        AeroAPI       `yaml:"aeroapi"`
@@ -94,6 +107,9 @@ func (c *Config) validate() error {
 	}
 	if c.Source == "adsb" && c.ADSB.URL == "" {
 		return fmt.Errorf("adsb.url is required when source is \"adsb\"")
+	}
+	if err := c.QuietHours.validate(); err != nil {
+		return err
 	}
 	return nil
 }

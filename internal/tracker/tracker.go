@@ -155,6 +155,20 @@ func (t *Tracker) ActiveCount() int {
 	return len(t.active)
 }
 
+// Clear removes all active sightings and returns Leave events for each.
+// Used when entering quiet hours to cleanly close all sighting sessions.
+func (t *Tracker) Clear() []model.Event {
+	var events []model.Event
+	for icao, sighting := range t.active {
+		events = append(events, model.Event{
+			Kind:     model.Leave,
+			Sighting: *sighting,
+		})
+		delete(t.active, icao)
+	}
+	return events
+}
+
 func (t *Tracker) computeBearingElevation(ac model.Aircraft) (float64, float64, float64) {
 	bearing := geo.Bearing(t.observer.Lat, t.observer.Lon, *ac.Lat, *ac.Lon)
 	groundDist := geo.GroundDistanceM(t.observer.Lat, t.observer.Lon, *ac.Lat, *ac.Lon)

@@ -87,6 +87,15 @@ adsb:
 
 aeroapi:
   key: "your-aeroapi-key"
+
+quiet_hours:
+  sun: { start: "00:00", end: "06:30" }
+  mon: { start: "22:00", end: "06:00" }
+  tue: { start: "22:00", end: "06:00" }
+  wed: { start: "22:00", end: "06:00" }
+  thu: { start: "22:00", end: "06:00" }
+  fri: { start: "23:00", end: "07:00" }
+  sat: { start: "23:00", end: "07:00" }
 ```
 
 ### OpenSky config (no hardware required)
@@ -123,6 +132,29 @@ The aperture defines what your window can see as compass bearings (azimuth) and 
 - **Multiple rectangles**: If your view wraps around a corner or has obstructions, use multiple rects.
 
 Start with generous ranges and narrow them based on which displayed flights you can actually see.
+
+### Quiet hours
+
+Suppress polling on a per-day schedule. During quiet hours the display shows a clock instead of flight data:
+
+```
+🌙 22:37
+```
+
+Configure with a map of day names to time windows:
+
+```yaml
+quiet_hours:
+  sun: { start: "00:00", end: "06:30" }
+  mon: { start: "22:00", end: "06:00" }
+  tue: { start: "22:00", end: "06:00" }
+  wed: { start: "22:00", end: "06:00" }
+  thu: { start: "22:00", end: "06:00" }
+  fri: { start: "23:00", end: "07:00" }
+  sat: { start: "23:00", end: "07:00" }
+```
+
+A window belongs to its start day — `mon: {start: "22:00", end: "06:00"}` means Monday 22:00 through Tuesday 06:00. Days without an entry have no quiet hours. Omit `quiet_hours` entirely to disable.
 
 ## Raspberry Pi deployment
 
@@ -162,6 +194,8 @@ Output:
 + DAL196   ICN-SEA   2050ft    # Delta 196 entered your view
 + ASA375   SEA-SFO   1575ft    # Alaska 375 entered
 - DAL196   ICN-SEA             # Delta 196 left your view
+🌙 22:00                        # Quiet hours started
+🌙 22:01
 ```
 
 ## License
