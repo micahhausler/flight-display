@@ -44,10 +44,34 @@ const (
 	Enter  EventKind = iota // aircraft entered the aperture
 	Update                  // aircraft still in aperture, state changed materially
 	Leave                   // aircraft left the aperture or TTL expired
+	Idle                    // idle display info (no aircraft in view)
 )
 
-// Event represents a change in the set of visible aircraft.
+// IdleIcon identifies the kind of ambient info for renderer-specific icon/glyph mapping.
+type IdleIcon int
+
+const (
+	IconClock       IdleIcon = iota
+	IconDate
+	IconSunrise
+	IconSunset
+	IconTemperature
+)
+
+// IdleInfo carries structured ambient display data.
+type IdleInfo struct {
+	Icon    IdleIcon
+	Primary string // formatted display string, e.g. "3:45 PM", "72°F / 22°C"
+}
+
+// Event is a tagged union. Kind determines which payload field is meaningful:
+//
+//	Enter, Update, Leave -> Sighting
+//	Idle                 -> IdleInfo
+//
+// Other fields are zero-valued and must not be read.
 type Event struct {
 	Kind     EventKind
 	Sighting Sighting
+	IdleInfo IdleInfo
 }

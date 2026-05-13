@@ -198,6 +198,17 @@ Output:
 🌙 22:01
 ```
 
+When no aircraft are in view, the display rotates through ambient info every 15 seconds:
+
+```
+  🕙 3:45 PM
+  📅 Tue May 13
+  🌅🔽 @ 8:45pm
+  🌡️ 72°F / 22°C
+```
+
+This is configurable via the `idle` section in config. Disable with `idle.enabled: false`.
+
 ## License
 
 MIT

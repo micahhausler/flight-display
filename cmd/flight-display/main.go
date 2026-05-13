@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"github.com/micahhausler/flight-display/internal/config"
 	"github.com/micahhausler/flight-display/internal/fetch"
 	"github.com/micahhausler/flight-display/internal/geo"
+	"github.com/micahhausler/flight-display/internal/idle"
 	"github.com/micahhausler/flight-display/internal/opensky"
 	"github.com/micahhausler/flight-display/internal/render"
 	"github.com/micahhausler/flight-display/internal/route"
@@ -68,6 +70,16 @@ func main() {
 	log.Printf("Observer: %.4f, %.4f (%.0fm MSL)", cfg.Observer.Lat, cfg.Observer.Lon, cfg.Observer.AltMSLMeter)
 	log.Printf("Max range: %.0f km, Poll interval: %s, Sighting TTL: %s", cfg.MaxRangeKM, pollInterval, cfg.SightingTTL)
 
+	// Set up idle display rotator
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var rotator *idle.Rotator
+	if cfg.Idle.IsEnabled() {
+		rotator = buildIdleRotator(cfg, ctx)
+		log.Printf("Idle display enabled (rotate every %ds, providers: %v)", cfg.Idle.RotateSeconds, cfg.Idle.Providers)
+	}
+
 	// Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -86,6 +98,14 @@ func main() {
 	wasQuiet := false
 	lastClockMinute := -1
 
+	// Idle state tracking
+	wasIdle := false
+	idleTickCount := 0
+	rotateEvery := cfg.Idle.RotateSeconds / int(pollInterval.Seconds())
+	if rotateEvery < 1 {
+		rotateEvery = 1
+	}
+
 	// Do an immediate first tick
 	now := time.Now()
 	if config.InQuietHours(now, cfg.QuietHours) {
@@ -93,7 +113,7 @@ func main() {
 		printClock(now)
 		lastClockMinute = now.Minute()
 	} else {
-		poll(fetcher, trk, renderer)
+		pollAndRender(fetcher, trk, renderer, rotator, &wasIdle, &idleTickCount, rotateEvery)
 	}
 
 	for {
@@ -109,6 +129,7 @@ func main() {
 						renderer.Render(event)
 					}
 					wasQuiet = true
+					wasIdle = false
 					lastClockMinute = -1
 				}
 				// Print clock once per minute
@@ -121,10 +142,11 @@ func main() {
 					log.Println("Quiet hours ended, resuming")
 					wasQuiet = false
 				}
-				poll(fetcher, trk, renderer)
+				pollAndRender(fetcher, trk, renderer, rotator, &wasIdle, &idleTickCount, rotateEvery)
 			}
 		case sig := <-sigCh:
 			log.Printf("Received %v, shutting down", sig)
+			cancel()
 			return
 		}
 	}
@@ -134,19 +156,34 @@ func printClock(now time.Time) {
 	fmt.Printf("\U0001F319 %s\n", now.Format("15:04"))
 }
 
-func newFetcher(cfg *config.Config) fetch.Fetcher {
-	switch cfg.Source {
-	case "adsb":
-		log.Printf("Using ADS-B source: %s", cfg.ADSB.URL)
-		return adsb.NewFetcher(cfg.ADSB.URL)
-	default:
-		latMin, lonMin, latMax, lonMax := computeBBox(cfg)
-		log.Printf("Using OpenSky source, bounding box: [%.2f, %.2f] to [%.2f, %.2f]", latMin, lonMin, latMax, lonMax)
-		return opensky.NewFetcher(cfg.OpenSky.ClientID, cfg.OpenSky.ClientSecret, latMin, lonMin, latMax, lonMax)
+func buildIdleRotator(cfg *config.Config, ctx context.Context) *idle.Rotator {
+	// Build providers based on config
+	providerSet := make(map[string]bool)
+	for _, name := range cfg.Idle.Providers {
+		providerSet[name] = true
 	}
+
+	var providers []idle.Provider
+
+	if providerSet["clock"] {
+		providers = append(providers, idle.NewClockProvider())
+	}
+	if providerSet["date"] {
+		providers = append(providers, idle.NewDateProvider())
+	}
+	if providerSet["sunrise_sunset"] {
+		providers = append(providers, idle.NewSunProvider(cfg.Observer.Lat, cfg.Observer.Lon))
+	}
+	if providerSet["weather"] {
+		wp := idle.NewWeatherProvider(cfg.Observer.Lat, cfg.Observer.Lon)
+		wp.Start(ctx)
+		providers = append(providers, wp)
+	}
+
+	return idle.NewRotator(providers)
 }
 
-func poll(fetcher fetch.Fetcher, trk *tracker.Tracker, renderer render.Renderer) {
+func pollAndRender(fetcher fetch.Fetcher, trk *tracker.Tracker, renderer render.Renderer, rotator *idle.Rotator, wasIdle *bool, idleTickCount *int, rotateEvery int) {
 	aircraft, err := fetcher.Fetch()
 	if err != nil {
 		log.Printf("Fetch error: %v", err)
@@ -158,8 +195,42 @@ func poll(fetcher fetch.Fetcher, trk *tracker.Tracker, renderer render.Renderer)
 	}
 
 	events := trk.Process(aircraft)
-	for _, event := range events {
-		renderer.Render(event)
+
+	if trk.ActiveCount() == 0 && rotator != nil {
+		// No aircraft in view — show idle display
+		if !*wasIdle {
+			rotator.Reset()
+			if ev, ok := rotator.Next(); ok {
+				renderer.Render(ev)
+			}
+			*wasIdle = true
+			*idleTickCount = 0
+		} else {
+			*idleTickCount++
+			if *idleTickCount >= rotateEvery {
+				if ev, ok := rotator.Next(); ok {
+					renderer.Render(ev)
+				}
+				*idleTickCount = 0
+			}
+		}
+	} else {
+		*wasIdle = false
+		for _, event := range events {
+			renderer.Render(event)
+		}
+	}
+}
+
+func newFetcher(cfg *config.Config) fetch.Fetcher {
+	switch cfg.Source {
+	case "adsb":
+		log.Printf("Using ADS-B source: %s", cfg.ADSB.URL)
+		return adsb.NewFetcher(cfg.ADSB.URL)
+	default:
+		latMin, lonMin, latMax, lonMax := computeBBox(cfg)
+		log.Printf("Using OpenSky source, bounding box: [%.2f, %.2f] to [%.2f, %.2f]", latMin, lonMin, latMax, lonMax)
+		return opensky.NewFetcher(cfg.OpenSky.ClientID, cfg.OpenSky.ClientSecret, latMin, lonMin, latMax, lonMax)
 	}
 }
 

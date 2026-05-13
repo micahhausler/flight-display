@@ -51,6 +51,21 @@ type TimeWindow struct {
 // Monday 22:00 through Tuesday 06:00.
 type QuietHours map[string]TimeWindow
 
+// Idle configures the idle display shown when no aircraft are in view.
+type Idle struct {
+	Enabled       *bool    `yaml:"enabled"`        // default: true
+	RotateSeconds int      `yaml:"rotate_seconds"` // how often to cycle items; default: 15
+	Providers     []string `yaml:"providers"`      // enabled providers; default: all
+}
+
+// IsEnabled returns whether idle display is enabled (defaults to true).
+func (i Idle) IsEnabled() bool {
+	if i.Enabled == nil {
+		return true
+	}
+	return *i.Enabled
+}
+
 type Config struct {
 	Source         string        `yaml:"source"` // "opensky" or "adsb"
 	Observer       Observer      `yaml:"observer"`
@@ -66,6 +81,7 @@ type Config struct {
 	ADSB           ADSB          `yaml:"adsb"`
 	AeroAPI        AeroAPI       `yaml:"aeroapi"`
 	RoutesDir      string        `yaml:"routes_dir"`
+	Idle           Idle          `yaml:"idle"`
 }
 
 func Load(path string) (*Config, error) {
@@ -141,5 +157,11 @@ func (c *Config) applyDefaults() {
 		} else {
 			c.AeroAPI.CachePath = "/tmp/flight-display-routes.json"
 		}
+	}
+	if c.Idle.RotateSeconds == 0 {
+		c.Idle.RotateSeconds = 15
+	}
+	if len(c.Idle.Providers) == 0 {
+		c.Idle.Providers = []string{"clock", "date", "sunrise_sunset", "weather"}
 	}
 }

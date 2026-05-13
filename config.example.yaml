@@ -44,3 +44,14 @@ opensky:
 # aeroapi:
 #   key: "your-api-key-here"
 #   cache_path: ~/.cache/flight-display/routes.json  # defaults to this
+
+## Idle display — shown when no aircraft are in view.
+## Rotates through ambient info (time, date, sunrise/sunset, weather).
+# idle:
+#   enabled: true
+#   rotate_seconds: 15
+#   providers:
+#     - clock
+#     - date
+#     - sunrise_sunset
+#     - weather

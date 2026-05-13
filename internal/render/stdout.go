@@ -20,20 +20,19 @@ func NewStdout() *Stdout {
 }
 
 func (s *Stdout) Render(event model.Event) {
-	// Suppress aircraft with no callsign
-	if event.Sighting.Aircraft.Callsign == nil {
-		return
-	}
-
-	// Prefer the marketing carrier ident when available (codeshare resolution)
-	callsign := *event.Sighting.Aircraft.Callsign
-	if event.Sighting.DisplayCallsign != nil {
-		callsign = *event.Sighting.DisplayCallsign
-	}
-	routeStr := displayRoute(event.Sighting.Route)
-
 	switch event.Kind {
+	case model.Idle:
+		icon := idleIconStr(event.IdleInfo.Icon)
+		fmt.Printf("  %s %s\n", icon, event.IdleInfo.Primary)
+		return
+
 	case model.Enter:
+		// Suppress aircraft with no callsign
+		if event.Sighting.Aircraft.Callsign == nil {
+			return
+		}
+		callsign := sightingCallsign(event.Sighting)
+		routeStr := displayRoute(event.Sighting.Route)
 		alt := ""
 		if event.Sighting.Aircraft.AltFt != nil {
 			alt = fmt.Sprintf("%dft", int(*event.Sighting.Aircraft.AltFt))
@@ -42,10 +41,43 @@ func (s *Stdout) Render(event model.Event) {
 		fmt.Printf("+ %-8s %-12s %7s\n", callsign, routeStr, alt)
 
 	case model.Leave:
+		// Suppress aircraft with no callsign
+		if event.Sighting.Aircraft.Callsign == nil {
+			return
+		}
+		callsign := sightingCallsign(event.Sighting)
+		routeStr := displayRoute(event.Sighting.Route)
 		fmt.Printf("- %-8s %s\n", callsign, routeStr)
 
 	case model.Update:
 		// V1: suppress update events
+	}
+}
+
+// sightingCallsign returns the display callsign, preferring the marketing carrier
+// ident (codeshare resolution) when available.
+func sightingCallsign(s model.Sighting) string {
+	if s.DisplayCallsign != nil {
+		return *s.DisplayCallsign
+	}
+	return *s.Aircraft.Callsign
+}
+
+// idleIconStr maps an IdleIcon to its emoji representation for stdout.
+func idleIconStr(icon model.IdleIcon) string {
+	switch icon {
+	case model.IconClock:
+		return "\U0001f559" // 🕙
+	case model.IconDate:
+		return "\U0001f4c5" // 📅
+	case model.IconSunrise:
+		return "\U0001f305" // 🌅
+	case model.IconSunset:
+		return "\U0001f305" // 🌅
+	case model.IconTemperature:
+		return "\U0001f321\ufe0f" // 🌡️
+	default:
+		return " "
 	}
 }
 

@@ -39,7 +39,8 @@ Route lookup happens synchronously in the tracker on Enter events.
 | `internal/config` | YAML config parsing, validation, defaults |
 | `internal/fetch` | Fetcher interface definition |
 | `internal/geo` | Bearing, elevation, distance, bounding box math |
-| `internal/model` | Aircraft, Sighting, Event, Route types |
+| `internal/idle` | Idle display providers (clock, date, sun, weather) + rotator |
+| `internal/model` | Aircraft, Sighting, Event, Route, IdleInfo types |
 | `internal/opensky` | OpenSky Network fetcher + normalizer |
 | `internal/render` | Renderer interface + stdout implementation |
 | `internal/route` | VRS static route database (fallback) |
@@ -62,6 +63,7 @@ Raspberry Pi 3B, Debian Bullseye arm64. The binary runs alongside:
 ## Design decisions to preserve
 
 - **Event-based rendering**, not snapshot-based. Tracker emits Enter/Update/Leave; renderers never diff.
+- **Idle display flows through the same Render(event) interface** as flight events, using a new `Idle` event kind. The poll loop owns idle detection and rotation timing.
 - **Failed polls do not empty the tracker.** "We don't know" ≠ "nothing is there."
 - **Identity keyed on ICAO24**, not callsign. Callsign can change or appear late.
 - **TimePosition from the source's clock**, not ingestion wall-clock. Staleness is measured against the source.

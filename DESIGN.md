@@ -617,9 +617,82 @@ flight-display/
       tracker.go       # Visibility filtering, sighting state, event emission
     render/
       stdout.go        # STDOUT renderer
+    idle/
+      idle.go          # Provider interface, Rotator
+      clock.go         # Clock and Date providers
+      sun.go           # Sunrise/sunset (NOAA solar position)
+      weather.go       # Temperature (open-meteo.com, background refresh)
   go.mod
   go.sum
 ```
+
+## Idle Display
+
+When no aircraft are visible (tracker active set is empty), the display rotates
+through ambient information items instead of showing a blank screen. This is an
+ambient display — it should always show something.
+
+### Idle Providers
+
+Each provider supplies one kind of information:
+
+```go
+type Provider interface {
+    Name() string
+    Current() (model.IdleInfo, bool) // false = no data, skip me
+}
+```
+
+Four providers:
+- **Clock** — current local time (e.g., "3:45 PM")
+- **Date** — current date (e.g., "Tue May 13")
+- **Sunrise/Sunset** — next sunrise or sunset computed from observer lat/lon using
+  the NOAA simplified solar position algorithm. Pure math, no external calls.
+  Format: "🌅🔼 @ 5:11am" (next sunrise) or "🌅🔽 @ 9:11pm" (next sunset)
+- **Weather** — current temperature from open-meteo.com (free, no API key).
+  Background goroutine refreshes every 15 minutes with a 2-second HTTP timeout.
+  Cache expires after 1 hour of consecutive failures. `Current()` is non-blocking.
+
+### Idle Event
+
+Idle information flows through the existing `Render(event)` interface as a new
+event kind:
+
+```go
+const Idle EventKind = 3
+
+type IdleInfo struct {
+    Icon    IdleIcon // IconClock, IconDate, IconSunrise, IconSunset, IconTemperature
+    Primary string   // pre-formatted display value
+}
+```
+
+The `Event` struct carries both `Sighting` and `IdleInfo` as a tagged union; `Kind`
+determines which is meaningful.
+
+### Rotation
+
+A `Rotator` cycles through providers in round-robin. The poll loop drives rotation:
+every N poll ticks (default: 3 ticks × 5s = 15 seconds), the rotator advances.
+Unavailable providers are skipped. When the active set transitions from non-empty to
+empty, the rotator resets and immediately renders the first item. When an aircraft
+enters, idle rendering stops immediately.
+
+### Configuration
+
+```yaml
+idle:
+  enabled: true           # default: true
+  rotate_seconds: 15      # rotation cadence
+  providers:              # which providers to include (default: all)
+    - clock
+    - date
+    - sunrise_sunset
+    - weather
+```
+
+Providers that cannot operate (e.g., weather with no network) self-disable by
+returning `false` from `Current()`. The rotator skips them.
 
 ## Scoped Out
 
