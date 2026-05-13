@@ -1,3 +1,6 @@
+## Data source: "opensky" or "adsb"
+# source: opensky
+
 observer:
   lat: 47.6115
   lon: -122.3470
@@ -25,6 +28,19 @@ commercial_only: false  # true to show only airline callsigns (filters GA N-numb
 
 # routes_dir: data/routes
 
+## OpenSky Network credentials (used when source: opensky)
 opensky:
   client_id: ""
   client_secret: ""
+
+## ADS-B receiver settings (used when source: adsb)
+## Queries the readsb HTTP API
+# adsb:
+#   url: http://localhost:8080/?all
+
+## AeroAPI route lookup (FlightAware)
+## When configured, routes are looked up via AeroAPI instead of the VRS database.
+## Get an API key at https://flightaware.com/aeroapi/
+# aeroapi:
+#   key: "your-api-key-here"
+#   cache_path: ~/.cache/flight-display/routes.json  # defaults to this

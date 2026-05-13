@@ -3,21 +3,32 @@
 An ambient display that shows aircraft visible from your window. You look outside, see a plane, and glance at the display to know what it is.
 
 ```
-+ DAL1714  SEA-SLC   1175ft
-+ ASA404   SEA-SFO   2600ft
-+ QXE2037  SEA-PDX   6425ft
-+ N64SV              9750ft
++ DAL196   ICN-SEA   2050ft
++ ASA375   SEA-SFO   1575ft
++ UAL2101  SFO-SEA   2875ft
 ```
 
 ## How it works
 
-You define your observer position (lat/lon/altitude) and the angular range of your window (azimuth and elevation bounds). The system polls [OpenSky Network](https://opensky-network.org/) for aircraft state vectors, filters them by:
+You define your observer position (lat/lon/altitude) and the angular range of your window (azimuth and elevation bounds). The system polls for aircraft state vectors, filters them by:
 
 1. **Aperture** — is the aircraft's bearing and elevation from you within your window's view?
 2. **Slant range** — is it close enough to actually see? (default 60 km)
 3. **Altitude and speed** — is it actually flying, not taxiing or parked?
 
-When an aircraft enters your view, it prints a line. When it leaves, it prints another. Route information (e.g., SEA-SFO) comes from the [VRS standing data](https://github.com/vradarserver/standing-data) CSV database, loaded at startup.
+When an aircraft enters your view, it prints a line. When it leaves, it prints another. Route information (e.g., ICN-SEA) comes from the [FlightAware AeroAPI](https://www.flightaware.com/aeroapi/) with a 31-day disk cache.
+
+## Data sources
+
+| Source | Description | Config |
+|--------|-------------|--------|
+| **ADS-B receiver** (recommended) | Local RTL-SDR dongle + [readsb](https://github.com/wiedehopf/readsb). Real-time, no rate limits. | `source: adsb` |
+| **OpenSky Network** | Remote API, useful for testing without hardware. | `source: opensky` |
+
+| Route source | Description | Config |
+|--------------|-------------|--------|
+| **AeroAPI** (recommended) | Live route data from FlightAware. $0.005/lookup, cached 31 days. PiAware feeders get $10/mo free. | `aeroapi.key: "..."` |
+| **VRS standing data** | Static CSV database. Free, but often stale. Fallback when no API key set. | `routes_dir: path/to/csvs` |
 
 ## Install
 
@@ -33,6 +44,12 @@ cd flight-display
 go build -o flight-display ./cmd/flight-display/
 ```
 
+Cross-compile for Raspberry Pi:
+
+```sh
+GOOS=linux GOARCH=arm64 go build -o flight-display ./cmd/flight-display/
+```
+
 ## Configuration
 
 Copy the example config and edit it for your location:
@@ -41,29 +58,59 @@ Copy the example config and edit it for your location:
 cp config.example.yaml config.yaml
 ```
 
+### Minimal config (ADS-B + AeroAPI)
+
 ```yaml
+source: adsb
+
 observer:
   lat: 47.6115
   lon: -122.3470
-  alt_msl_meters: 55  # ground elevation + floor height
+  alt_msl_meters: 55
 
 aperture:
   rects:
-    - az_min: 160     # start of view (degrees, clockwise from north)
-      az_max: 290     # end of view
-      el_min: -2      # minimum elevation angle
-      el_max: 30      # maximum elevation angle
+    - az_min: 160
+      az_max: 290
+      el_min: -2
+      el_max: 30
+
+poll_interval: 5s
+sighting_ttl: 60s
+max_range_km: 60
+min_alt_ft: 150
+min_speed_kt: 50
+commercial_only: true
+
+adsb:
+  url: "http://localhost:8080/?all"
+
+aeroapi:
+  key: "your-aeroapi-key"
+```
+
+### OpenSky config (no hardware required)
+
+```yaml
+source: opensky
+
+observer:
+  lat: 47.6115
+  lon: -122.3470
+  alt_msl_meters: 55
+
+aperture:
+  rects:
+    - az_min: 160
+      az_max: 290
+      el_min: -2
+      el_max: 30
 
 poll_interval: 30s
-sighting_ttl: 60s
-max_range_km: 60      # ~35 miles, naked-eye limit
-min_alt_ft: 150       # suppress ground-level aircraft
-min_speed_kt: 50      # suppress taxiing aircraft
-
-# routes_dir: data/routes   # path to VRS standing-data route CSVs
+max_range_km: 60
 
 opensky:
-  client_id: ""       # optional, for higher API rate limits
+  client_id: ""
   client_secret: ""
 ```
 
@@ -77,21 +124,31 @@ The aperture defines what your window can see as compass bearings (azimuth) and 
 
 Start with generous ranges and narrow them based on which displayed flights you can actually see.
 
-### Route enrichment
+## Raspberry Pi deployment
 
-To display route information (origin/destination airports), download the [VRS standing data](https://github.com/vradarserver/standing-data) route CSVs:
+Setup scripts are included for deploying on a Raspberry Pi with an RTL-SDR dongle:
 
 ```sh
-git clone https://github.com/vradarserver/standing-data.git data/standing-data
+# 1. Install readsb (ADS-B decoder) — builds from source, creates systemd service
+ssh pi 'sudo bash -s -- --lat 47.6115 --lon -122.3470' < setup-adsb.sh
+
+# 2. (Optional) Install PiAware to feed FlightAware and get free AeroAPI credit
+ssh pi 'sudo bash -s' < setup-piaware.sh
+
+# 3. Deploy the binary
+GOOS=linux GOARCH=arm64 go build -o flight-display ./cmd/flight-display/
+scp flight-display pi:~/bin/flight-display
+scp config.yaml pi:~/config.yaml
+
+# 4. Run
+ssh pi '~/bin/flight-display -config ~/config.yaml'
 ```
 
-Then set `routes_dir` in your config:
+### Hardware
 
-```yaml
-routes_dir: data/standing-data/routes/schema-01
-```
-
-This covers most scheduled commercial traffic. GA, military, and charter flights will show callsign and altitude only.
+- Raspberry Pi 3B+ or newer (arm64)
+- [Nooelec NESDR Mini](https://www.amazon.com/dp/B009U7WZCA) (or any RTL2832U-based USB dongle)
+- Antenna (included with the dongle, or a dedicated 1090 MHz antenna for better range)
 
 ## Usage
 
@@ -102,15 +159,10 @@ This covers most scheduled commercial traffic. GA, military, and charter flights
 Output:
 
 ```
-+ DAL1714  SEA-SLC   1175ft    # Delta 1714 entered your view
-+ ASA404   SEA-SFO   2600ft    # Alaska 404 entered
-- DAL1714  SEA-SLC             # Delta 1714 left your view
-+ N64SV              9750ft    # GA aircraft, no route in database
++ DAL196   ICN-SEA   2050ft    # Delta 196 entered your view
++ ASA375   SEA-SFO   1575ft    # Alaska 375 entered
+- DAL196   ICN-SEA             # Delta 196 left your view
 ```
-
-### OpenSky API limits
-
-Anonymous access: 400 credits/day, 10-second state resolution. At the default 30-second poll interval, this costs ~2,880 credits/day — you'll need a free [OpenSky account](https://opensky-network.org/index.php/login) for authenticated access (4,000 credits/day). Active ADS-B feeders get 8,000 credits/day.
 
 ## License
 

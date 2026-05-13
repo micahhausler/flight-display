@@ -177,46 +177,48 @@ The renderer receives events, not snapshots. This means:
 
 ### Route Enrichment
 
-Route information (origin/destination airports) is not available from the OpenSky
-state vectors endpoint. It is sourced from the Virtual Radar Server (VRS) standing
-data — a community-maintained, CC0-licensed database of callsign-to-route mappings.
-
-The VRS route data is a set of CSV files keyed by ICAO callsign code (e.g., `DAL` for
-Delta, `ASA` for Alaska). Each row maps a callsign to a hyphen-separated list of ICAO
-airport codes:
-
-```
-DAL1921,DAL,1921,DAL,KSEA-KBNA
-ASA1042,ASA,1042,ASA,KSEA-KSFO
-```
-
-The route database is loaded from local CSV files at startup into an in-memory map
-keyed by normalized callsign. Lookup is per-sighting: when a new aircraft enters the
-aperture, its callsign is normalized (using VRS's normalization rules — split into
-code + number, strip leading zeros from number, swap IATA code for ICAO if needed)
-and looked up in the map. The result is stored on the Sighting.
-
-Coverage: the VRS database covers most scheduled commercial traffic. GA, military,
-and charter flights will not have entries. This is acceptable — commercial traffic
-dominates what is visible from this location, and missing routes degrade gracefully
-(callsign + altitude is still displayed).
-
-The ICAO airport codes from the database (e.g., `KSEA`) are converted to IATA codes
-(e.g., `SEA`) for display. A small static mapping of the ~500 most common airports
-covers this; unknown ICAO codes pass through as-is.
+Route information (origin/destination airports) comes from the FlightAware AeroAPI.
+When a new aircraft enters the aperture, its callsign is looked up via
+`GET /flights/{ident}` with `ident_type=designator`. The response provides origin
+and destination airports with IATA codes.
 
 ```go
 type Route struct {
-    Airports []string // IATA codes in order flown, e.g. ["SEA", "BNA"]
+    Airports []string // IATA codes in order flown, e.g. ["SEA", "SFO"]
 }
 ```
 
-The Sighting struct gains an optional route:
+The AeroAPI lookup is backed by a disk-persisted cache with a 31-day TTL. The cache
+stores both positive results (callsign → route) and negative results (callsign → nil,
+meaning "we checked, no route exists"). This prevents repeated API calls for GA tail
+numbers that will never have a route.
+
+Cache behavior:
+- On Enter, check cache for callsign.
+- Cache hit (< 31 days old): use cached result. No API call.
+- Cache miss or stale: call AeroAPI, store result to disk, use it.
+- API error: fall back to VRS static database if configured.
+
+The cache is a single JSON file at `~/.cache/flight-display/routes.json`. It is
+loaded at startup and written on each new entry. The dataset is small (a few hundred
+entries after steady-state operation) and writes are infrequent (a few per day once
+the cache is warm).
+
+Cost: `GET /flights/{ident}` costs $0.005 per result set. With a 31-day cache and
+a typical window seeing ~100 unique commercial callsigns per month, steady-state cost
+is under $1/month. A PiAware ADS-B feeder gets $10/month in free API credit.
+
+A fallback route source — the Virtual Radar Server (VRS) standing data — can be
+configured via `routes_dir`. When an AeroAPI key is configured, it takes precedence;
+VRS is only consulted on API failure. When no AeroAPI key is configured, VRS is used
+directly as before.
+
+The Sighting struct carries the optional route:
 
 ```go
 type Sighting struct {
     Aircraft     Aircraft
-    Route        *Route    // nil if callsign not in route database
+    Route        *Route    // nil if no route found in any source
     BearingDeg   float64
     ElevationDeg float64
     FirstSeen    time.Time
@@ -250,23 +252,79 @@ On Leave, the renderer prints:
 ## Data Flow
 
 ```
-┌─────────┐     ┌────────────┐     ┌──────────────┐     ┌──────────┐
-│ Fetcher │────>│ Normalizer │────>│   Tracker    │────>│ Renderer │
-└─────────┘     └────────────┘     └──────────────┘     └──────────┘
+┌─────────┐                        ┌──────────────┐     ┌──────────┐
+│ Fetcher │───── []Aircraft ──────>│   Tracker    │────>│ Renderer │
+└─────────┘                        └──────────────┘     └──────────┘
      ^                                    │
      │                                    │
-  OpenSky API                    Visibility filter +
-  (bounding box query)           sighting state +
-                                 event emission +
-                                 route lookup
+  ADS-B receiver (readsb)       Visibility filter +
+  or OpenSky API                sighting state +
+                                event emission +
+                                route lookup (AeroAPI)
 ```
 
+The Fetcher interface abstracts the aircraft data source:
+
+```go
+type Fetcher interface {
+    Fetch() ([]model.Aircraft, error)
+    MinInterval() time.Duration
+}
+```
+
+`Fetch()` returns the current set of aircraft. Returns nil, nil to signal a skipped
+poll (e.g., rate-limited). `MinInterval()` returns the minimum polling interval the
+source supports — the poll loop will not poll faster than this regardless of
+configuration.
+
+Two implementations exist:
+
+- **ADS-B fetcher**: Queries a local readsb instance's HTTP API
+  (`http://localhost:8080/?all`). The RTL-SDR dongle and readsb handle radio reception
+  and Mode S decoding. The fetcher reads pre-aggregated aircraft state at 1Hz.
+  MinInterval: 5 seconds.
+- **OpenSky fetcher**: Queries the OpenSky Network REST API with a geographic bounding
+  box. Handles OAuth2 token refresh and rate limiting. MinInterval: 10 seconds.
+
+Each fetcher owns its own filtering semantics. The OpenSky fetcher applies a bounding
+box server-side (query optimization). The ADS-B fetcher returns everything the antenna
+receives — the antenna's physical range is the de facto filter.
+
 Route lookup happens in the tracker at Enter time — when a new aircraft becomes
-visible, its callsign is looked up in the route database. The route is stored on
-the sighting and included in the Enter event. The route database is read-only after
-startup; the tracker holds a reference to it but does not modify it.
+visible, its callsign is looked up via the route source (AeroAPI with disk cache,
+falling back to VRS). The route is stored on the sighting and included in the Enter
+event.
 
 ### Fetcher
+
+The Fetcher interface decouples the data source from the tracker. Configuration
+selects which implementation is active.
+
+#### ADS-B Fetcher
+
+Reads from a local readsb instance via its HTTP API (`GET /?all` on port 8080).
+readsb handles RTL-SDR device interaction and ADS-B/Mode S decoding as a separate
+systemd service. The fetcher normalizes readsb's JSON into `[]Aircraft`:
+
+- `hex` → ICAO24
+- `flight` → Callsign (trimmed)
+- `lat`, `lon` → Lat, Lon
+- `alt_baro` → AltFt (already in feet; can be the string "ground" indicating on-ground)
+- `alt_geom` → fallback altitude (already in feet)
+- `gs` → VelocityKt (already in knots)
+- `track` → HeadingDeg
+- `seen` → TimePosition (computed as `now - seen` seconds)
+
+No unit conversion is needed — readsb outputs feet and knots natively.
+
+The `alt_baro` field requires special handling: it is normally a number but can be
+the string `"ground"` when the aircraft reports on-ground status. A custom JSON
+unmarshaler handles this polymorphism.
+
+MinInterval: 5 seconds. readsb updates at 1Hz but polling faster than 5s adds no
+display value.
+
+#### OpenSky Fetcher
 
 Calls the OpenSky `/states/all` endpoint with a geographic bounding box. The bounding
 box is a query optimization — it reduces the response size and API credit cost. It is
@@ -278,51 +336,30 @@ bounding box radius is simply `max_range_km` plus a margin for aircraft movement
 between polls. This produces a tight box (~120 km across for a 60 km range) that
 costs 1 API credit per query.
 
-When `max_range_km` is not configured, the radius is derived from the aperture:
+The fetcher owns rate limiting. OpenSky anonymous access has 400 credits/day. An
+active feeder gets 8,000 credits/day. Default poll interval: 30 seconds.
 
-```
-ground_distance = max_considered_altitude / tan(min_elevation_angle)
-bbox_radius = ground_distance + (poll_interval * max_aircraft_speed)
-```
-
-This fallback produces a much larger box. The aperture and range filters handle
-precision in either case.
-
-The fetcher owns rate limiting. OpenSky anonymous access resolves state every 10 seconds
-and has 400 credits/day for the states endpoint. A bounding box <= 25 sq degrees costs
-1 credit. At one poll per 10 seconds, that's 8,640 credits/day — exceeding the anonymous
-quota. Options:
-
-- **Authenticated access** (standard user): 4,000 credits/day, 5-second resolution.
-  At one poll per 10 seconds: 8,640 credits/day. Still exceeds.
-- **Poll less frequently**: one poll per 30 seconds costs 2,880 credits/day. Fits
-  within standard-user quota with margin.
-- **Active feeder**: 8,000 credits/day. One poll per 10 seconds fits.
-
-Default poll interval: **30 seconds**. Configurable. The fetcher enforces a minimum
-interval of 10 seconds regardless of configuration.
-
-On HTTP 429 (rate limited), the fetcher reads `X-Rate-Limit-Retry-After-Seconds` and
-waits. On other errors, it logs and retries at the next poll interval. The fetcher never
-crashes the process on transient API failures.
+On HTTP 429 (rate limited), the fetcher returns nil, nil — signaling a skipped poll.
+On other errors, it returns an error. The fetcher never crashes the process on
+transient API failures.
 
 Authentication: OAuth2 client credentials flow. Client ID and secret are provided via
-config. If not provided, the fetcher operates anonymously (tighter limits, 10-second
-resolution).
+config. If not provided, the fetcher operates anonymously (tighter limits).
+
+MinInterval: 10 seconds.
 
 ### Normalizer
 
-Converts the OpenSky JSON response into `[]Aircraft`. This is where unit conversions
-happen:
+Each fetcher normalizes its source-specific response into `[]Aircraft`. This is where
+unit conversions happen (if any):
 
-- Altitude: meters to feet (`m * 3.28084`)
-- Velocity: m/s to knots (`ms * 1.94384`)
-- Callsign: trimmed of whitespace (OpenSky pads to 8 chars)
+- **OpenSky**: Altitude meters → feet (`m * 3.28084`), velocity m/s → knots
+  (`ms * 1.94384`), callsign trimmed of whitespace (OpenSky pads to 8 chars).
+  Barometric altitude (field index 7) with geometric altitude (index 13) as fallback.
+- **ADS-B (readsb)**: No unit conversion needed. readsb outputs altitude in feet and
+  ground speed in knots natively. Callsign trimmed of whitespace.
 
-Barometric altitude is used (field index 7). Geometric altitude (index 13) is the
-fallback if barometric is nil.
-
-Aircraft with no ICAO24 are dropped (should not happen, but defensive).
+Aircraft with no ICAO24 are dropped by both normalizers.
 
 ### Tracker
 
@@ -363,21 +400,25 @@ The STDOUT renderer suppresses:
 The top-level orchestrator. Pseudocode:
 
 ```
-every <poll_interval>:
-    states, err = fetcher.Fetch()
+interval = max(config.poll_interval, fetcher.MinInterval())
+
+every <interval>:
+    aircraft, err = fetcher.Fetch()
     if err:
         log error
         // Do NOT pass empty list to tracker. A failed poll means
-        // "we don't know" — not "the sky is empty." Active sightings
-        // continue aging against their TTL naturally.
+        // "we don't know" — not "the sky is empty."
         continue
-    aircraft = normalizer.Normalize(states)
+    if aircraft == nil:
+        // Skipped poll (e.g., rate-limited). Don't update tracker.
+        continue
     events = tracker.Process(aircraft)
     for event in events:
         renderer.Render(event)
 ```
 
-The poll loop does not know about OpenSky, visibility math, or display formatting.
+The poll loop does not know about OpenSky, ADS-B, visibility math, or display
+formatting.
 
 ### Failure Semantics
 
@@ -397,9 +438,11 @@ for an ambient display.
 
 ## Configuration
 
-A YAML file. Example for a high-rise apartment in Seattle with southwest-facing windows:
+A YAML file. Example for a Raspberry Pi with an ADS-B receiver near Seattle:
 
 ```yaml
+source: adsb  # "adsb" or "opensky"
+
 observer:
   lat: 47.6115
   lon: -122.3470
@@ -418,19 +461,32 @@ aperture:
       el_min: 0
       el_max: 15
 
-poll_interval: 30s
-
+poll_interval: 5s
 sighting_ttl: 60s
+max_range_km: 60
+min_alt_ft: 150
+min_speed_kt: 50
+commercial_only: true
 
-max_range_km: 60  # ~35 miles, naked-eye limit for commercial jets in clear weather
-min_alt_ft: 150   # suppress aircraft at/near ground level
-min_speed_kt: 50  # suppress taxiing aircraft reporting as airborne
+adsb:
+  url: "http://localhost:8080/?all"
 
-opensky:
-  # Omit for anonymous access
-  client_id: ""
-  client_secret: ""
+aeroapi:
+  key: ""  # FlightAware AeroAPI key; omit to use VRS database
+  # cache_path: ~/.cache/flight-display/routes.json  # default
+
+# opensky:
+#   client_id: ""
+#   client_secret: ""
 ```
+
+The `source` field selects the aircraft data source. Default poll interval depends
+on the source: 5 seconds for ADS-B, 30 seconds for OpenSky. The poll loop enforces
+each source's MinInterval as a floor.
+
+When `aeroapi.key` is set, route lookups use the FlightAware AeroAPI with a 31-day
+disk cache. When empty, routes come from the VRS static database (configured via
+`routes_dir`).
 
 Negative elevation minimum allows for aircraft below the observer's altitude (e.g.,
 low approaches to SEA visible from an elevated vantage point).
@@ -457,25 +513,31 @@ flight-display/
     flight-display/
       main.go          # CLI entry point, config loading, poll loop
   internal/
+    adsb/
+      fetcher.go       # ADS-B fetcher: reads readsb HTTP API
+    aeroapi/
+      client.go        # FlightAware AeroAPI HTTP client
+      cache.go         # Disk-backed 31-day route cache
     config/
       config.go        # YAML config parsing
+    fetch/
+      fetcher.go       # Fetcher interface definition
     geo/
       geo.go           # bearing, elevation, distance calculations
     opensky/
-      client.go        # HTTP client, auth, rate limiting
+      client.go        # OpenSky HTTP client, auth, rate limiting
+      fetcher.go       # OpenSky Fetcher implementation
       types.go         # OpenSky API response types
       normalize.go     # OpenSky response -> []Aircraft
     model/
       aircraft.go      # Aircraft, Sighting, Event, Route types
     route/
-      db.go            # Route database: load CSV, normalize callsign, lookup
+      db.go            # VRS route database (fallback)
       icao_to_iata.go  # ICAO airport code to IATA conversion
     tracker/
       tracker.go       # Visibility filtering, sighting state, event emission
     render/
       stdout.go        # STDOUT renderer
-  data/
-    routes/            # VRS standing data CSV files (git-tracked or downloaded)
   go.mod
   go.sum
 ```
@@ -483,16 +545,12 @@ flight-display/
 ## Scoped Out
 
 - **LED matrix renderer**. The `Renderer` interface exists; a matrix implementation is
-  additive.
-- **ADS-B receiver input**. When this arrives, the internal model (`Aircraft`) stays the
-  same. A new fetcher+normalizer pair replaces the OpenSky pair. The tracker and renderer
-  are untouched.
+  additive. The target hardware is a MAX7219 8-in-1 dot matrix (8x64 pixels, SPI) on
+  a Raspberry Pi. The renderer will need an internal event queue and a background
+  goroutine driving scroll, since `Render()` must not block the poll loop.
 - **"Will soon cross" prediction**. Trajectory prediction from heading and speed gives
   ~30-60 seconds of useful lookahead before altitude changes and ATC vectoring make it
   wrong. STAR/SID-aware prediction is a separate project. Deferred.
-- **Live route lookup via API** (FlightAware, AeroAPI). The static VRS database covers
-  scheduled commercial traffic. Real-time route lookup for GA/charter is a second data
-  source dependency with its own rate limits and cost. Deferred.
 - **Web UI**.
 - **Multi-user / multi-window**. The config supports one observer and one aperture. Running
   multiple instances with different configs is the multi-window story for now.
@@ -514,14 +572,32 @@ previous set against the current set to determine what changed. Event-based rend
 (enter/update/leave) pushes this responsibility into the tracker once, and renderers
 receive pre-computed transitions.
 
-**Building a formal data provider interface before the second provider exists.** The
-ADS-B receiver's data shape is unknown until we have one. A premature abstraction will be
-designed against imagination rather than reality. The `Aircraft` struct is the contract;
-the interface emerges when the second implementation arrives.
+**Pure-Go RTL-SDR / ADS-B decoding.** Reimplementing the DSP demodulation, Mode S frame
+decoding, CRC, CPR position decoding, and aircraft state aggregation in Go would mean
+owning a decoder stack. readsb already does this correctly and is battle-tested. Working
+in the seam — letting readsb own device interaction and decoding, reading its HTTP API —
+avoids this entire layer.
+
+**Reading readsb's aircraft.json file from disk.** readsb writes this file to `/run`
+(tmpfs), so SD card wear is not the concern. The HTTP API (`--net-api-port`) is the
+supported interface — it's stable across installs, doesn't depend on filesystem layout
+or the `--write-json` flag being set, and fails loudly if readsb is down rather than
+silently reading a stale file.
+
+**VRS static database as primary route source.** The VRS standing-data CSV files are
+community-maintained and often stale or incomplete. AeroAPI provides live, accurate
+route data for the current flight. With a 31-day disk cache, AeroAPI costs under
+$1/month and provides better coverage — including regional operators and charter
+flights that VRS misses entirely.
+
+**In-memory route cache (no disk persistence).** A cold cache on every restart means
+~100+ API calls each time the process starts. Disk persistence ensures the cache
+survives restarts and accumulates over time, reducing API cost to near-zero in
+steady state.
 
 **Python.** Mature geo libraries, but the geo math here is basic trig — no need for
-shapely or pyproj. Go provides a single binary, clean cross-compilation for Raspberry Pi
-(the likely LED matrix host), and a natural polling model with goroutines.
+shapely or pyproj. Go provides a single binary, clean cross-compilation for Raspberry Pi,
+and a natural polling model with goroutines.
 
 **Bearing-from-observer in the display.** The bearing (azimuth from observer) tells
 you roughly where in the window to look. Dropped because the window view is narrow

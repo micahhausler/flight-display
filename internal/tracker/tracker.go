@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"log"
 	"math"
 	"regexp"
 	"time"
@@ -15,6 +16,11 @@ const (
 	altChangeThreshold     = 200.0 // feet
 	bearingChangeThreshold = 5.0   // degrees
 )
+
+// RouteLookup provides route information for a callsign.
+type RouteLookup interface {
+	Lookup(callsign string) (*model.Route, error)
+}
 
 // airlineCallsignRe matches ICAO airline callsigns: 2-3 letter code followed by
 // digits with optional letter suffix (e.g. DAL1714, SKW112J, ASA95).
@@ -31,6 +37,7 @@ type Tracker struct {
 	minSpeedKt     float64
 	commercialOnly bool
 	routeDB        *route.DB
+	routeLookup    RouteLookup // optional: AeroAPI or other live route source
 
 	active map[string]*model.Sighting // keyed by ICAO24
 }
@@ -45,6 +52,12 @@ func New(obs config.Observer, ap config.Aperture, ttl time.Duration, maxRangeKM 
 		routeDB:   routeDB,
 		active:    make(map[string]*model.Sighting),
 	}
+}
+
+// SetRouteLookup sets an optional live route lookup source (e.g., AeroAPI).
+// When set, this is used as the primary route source; VRS is the fallback.
+func (t *Tracker) SetRouteLookup(rl RouteLookup) {
+	t.routeLookup = rl
 }
 
 // SetFilters configures minimum altitude, speed, and commercial-only filters.
@@ -100,7 +113,7 @@ func (t *Tracker) Process(aircraft []model.Aircraft) []model.Event {
 			// New sighting
 			var r *model.Route
 			if ac.Callsign != nil {
-				r = t.routeDB.Lookup(*ac.Callsign)
+				r = t.lookupRoute(*ac.Callsign)
 			}
 
 			sighting := &model.Sighting{
@@ -194,4 +207,17 @@ func (t *Tracker) materialChange(s *model.Sighting, newBearing, newElevation flo
 		return true
 	}
 	return false
+}
+
+// lookupRoute tries the live route source first (AeroAPI), falls back to VRS.
+func (t *Tracker) lookupRoute(callsign string) *model.Route {
+	if t.routeLookup != nil {
+		r, err := t.routeLookup.Lookup(callsign)
+		if err != nil {
+			log.Printf("Route lookup error for %s: %v (falling back to VRS)", callsign, err)
+			return t.routeDB.Lookup(callsign)
+		}
+		return r
+	}
+	return t.routeDB.Lookup(callsign)
 }

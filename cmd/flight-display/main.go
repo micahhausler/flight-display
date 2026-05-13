@@ -10,7 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/micahhausler/flight-display/internal/adsb"
+	"github.com/micahhausler/flight-display/internal/aeroapi"
 	"github.com/micahhausler/flight-display/internal/config"
+	"github.com/micahhausler/flight-display/internal/fetch"
 	"github.com/micahhausler/flight-display/internal/geo"
 	"github.com/micahhausler/flight-display/internal/opensky"
 	"github.com/micahhausler/flight-display/internal/render"
@@ -39,35 +42,49 @@ func main() {
 		log.Println("No routes_dir configured, running without route enrichment")
 	}
 
-	// Initialize components
-	client := opensky.NewClient(cfg.OpenSky.ClientID, cfg.OpenSky.ClientSecret)
+	// Initialize fetcher based on configured source
+	fetcher := newFetcher(cfg)
+
+	// Initialize renderer and tracker
 	renderer := render.NewStdout()
 	trk := tracker.New(cfg.Observer, cfg.Aperture, cfg.SightingTTL, cfg.MaxRangeKM, routeDB)
 	trk.SetFilters(cfg.MinAltFt, cfg.MinSpeedKt, cfg.CommercialOnly)
 
-	// Compute bounding box from observer + aperture
-	latMin, lonMin, latMax, lonMax := computeBBox(cfg)
+	// Set up AeroAPI route lookup if configured
+	if cfg.AeroAPI.Key != "" {
+		client := aeroapi.NewClient(cfg.AeroAPI.Key)
+		cache := aeroapi.NewCache(client, cfg.AeroAPI.CachePath)
+		trk.SetRouteLookup(cache)
+		log.Printf("AeroAPI route lookup enabled (cache: %s)", cfg.AeroAPI.CachePath)
+	}
+
+	// Determine effective poll interval (config value floored by source minimum)
+	pollInterval := cfg.PollInterval
+	if min := fetcher.MinInterval(); pollInterval < min {
+		pollInterval = min
+	}
+
+	log.Printf("Source: %s", cfg.Source)
 	log.Printf("Observer: %.4f, %.4f (%.0fm MSL)", cfg.Observer.Lat, cfg.Observer.Lon, cfg.Observer.AltMSLMeter)
-	log.Printf("Bounding box: [%.2f, %.2f] to [%.2f, %.2f]", latMin, lonMin, latMax, lonMax)
-	log.Printf("Max range: %.0f km, Poll interval: %s, Sighting TTL: %s", cfg.MaxRangeKM, cfg.PollInterval, cfg.SightingTTL)
+	log.Printf("Max range: %.0f km, Poll interval: %s, Sighting TTL: %s", cfg.MaxRangeKM, pollInterval, cfg.SightingTTL)
 
 	// Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// Poll loop
-	ticker := time.NewTicker(cfg.PollInterval)
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	log.Println("Starting flight display...")
 
 	// Do an immediate first poll
-	poll(client, trk, renderer, latMin, lonMin, latMax, lonMax)
+	poll(fetcher, trk, renderer)
 
 	for {
 		select {
 		case <-ticker.C:
-			poll(client, trk, renderer, latMin, lonMin, latMax, lonMax)
+			poll(fetcher, trk, renderer)
 		case sig := <-sigCh:
 			log.Printf("Received %v, shutting down", sig)
 			return
@@ -75,18 +92,29 @@ func main() {
 	}
 }
 
-func poll(client *opensky.Client, trk *tracker.Tracker, renderer render.Renderer, latMin, lonMin, latMax, lonMax float64) {
-	resp, err := client.FetchStates(latMin, lonMin, latMax, lonMax)
+func newFetcher(cfg *config.Config) fetch.Fetcher {
+	switch cfg.Source {
+	case "adsb":
+		log.Printf("Using ADS-B source: %s", cfg.ADSB.URL)
+		return adsb.NewFetcher(cfg.ADSB.URL)
+	default:
+		latMin, lonMin, latMax, lonMax := computeBBox(cfg)
+		log.Printf("Using OpenSky source, bounding box: [%.2f, %.2f] to [%.2f, %.2f]", latMin, lonMin, latMax, lonMax)
+		return opensky.NewFetcher(cfg.OpenSky.ClientID, cfg.OpenSky.ClientSecret, latMin, lonMin, latMax, lonMax)
+	}
+}
+
+func poll(fetcher fetch.Fetcher, trk *tracker.Tracker, renderer render.Renderer) {
+	aircraft, err := fetcher.Fetch()
 	if err != nil {
 		log.Printf("Fetch error: %v", err)
 		return
 	}
-	if resp == nil {
-		// Rate limited — skip this poll, don't update tracker
+	if aircraft == nil {
+		// Skipped poll (e.g., rate-limited) — don't update tracker
 		return
 	}
 
-	aircraft := opensky.Normalize(resp)
 	events := trk.Process(aircraft)
 	for _, event := range events {
 		renderer.Render(event)

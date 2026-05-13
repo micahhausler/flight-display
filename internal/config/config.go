@@ -30,7 +30,17 @@ type OpenSky struct {
 	ClientSecret string `yaml:"client_secret"`
 }
 
+type ADSB struct {
+	URL string `yaml:"url"` // readsb HTTP API URL (e.g., http://localhost:8080/?all)
+}
+
+type AeroAPI struct {
+	Key       string `yaml:"key"`        // AeroAPI key; empty disables the feature
+	CachePath string `yaml:"cache_path"` // path to disk cache file
+}
+
 type Config struct {
+	Source         string        `yaml:"source"` // "opensky" or "adsb"
 	Observer       Observer      `yaml:"observer"`
 	Aperture       Aperture      `yaml:"aperture"`
 	PollInterval   time.Duration `yaml:"poll_interval"`
@@ -40,6 +50,8 @@ type Config struct {
 	MinSpeedKt     float64       `yaml:"min_speed_kt"`
 	CommercialOnly bool          `yaml:"commercial_only"`
 	OpenSky        OpenSky       `yaml:"opensky"`
+	ADSB           ADSB          `yaml:"adsb"`
+	AeroAPI        AeroAPI       `yaml:"aeroapi"`
 	RoutesDir      string        `yaml:"routes_dir"`
 }
 
@@ -74,20 +86,44 @@ func (c *Config) validate() error {
 			return fmt.Errorf("aperture.rects[%d]: el_min (%v) > el_max (%v)", i, r.ElMin, r.ElMax)
 		}
 	}
+	switch c.Source {
+	case "", "opensky", "adsb":
+		// valid
+	default:
+		return fmt.Errorf("source must be \"opensky\" or \"adsb\", got %q", c.Source)
+	}
+	if c.Source == "adsb" && c.ADSB.URL == "" {
+		return fmt.Errorf("adsb.url is required when source is \"adsb\"")
+	}
 	return nil
 }
 
 func (c *Config) applyDefaults() {
-	if c.PollInterval == 0 {
-		c.PollInterval = 30 * time.Second
+	if c.Source == "" {
+		c.Source = "opensky"
 	}
-	if c.PollInterval < 10*time.Second {
-		c.PollInterval = 10 * time.Second
+	if c.PollInterval == 0 {
+		if c.Source == "adsb" {
+			c.PollInterval = 5 * time.Second
+		} else {
+			c.PollInterval = 30 * time.Second
+		}
 	}
 	if c.SightingTTL == 0 {
 		c.SightingTTL = 60 * time.Second
 	}
 	if c.MaxRangeKM == 0 {
 		c.MaxRangeKM = 60
+	}
+	if c.ADSB.URL == "" {
+		c.ADSB.URL = "http://localhost:8080/?all"
+	}
+	if c.AeroAPI.Key != "" && c.AeroAPI.CachePath == "" {
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			c.AeroAPI.CachePath = home + "/.cache/flight-display/routes.json"
+		} else {
+			c.AeroAPI.CachePath = "/tmp/flight-display-routes.json"
+		}
 	}
 }
