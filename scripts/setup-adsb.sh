@@ -172,6 +172,7 @@ ExecStart=/usr/local/bin/readsb \\
     --ppm 0 \\
     --net \\
     --net-connector localhost,30003,beast_out \\
+    --net-bi-port 30104 \\
     --net-bo-port 30005 \\
     --net-json-port 30047 \\
     --net-api-port 8080 \\

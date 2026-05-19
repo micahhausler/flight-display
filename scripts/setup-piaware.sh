@@ -128,6 +128,7 @@ fi
 # Allow automatic updates for piaware
 piaware-config allow-auto-updates yes
 piaware-config allow-manual-updates yes
+piaware-config allow-mlat yes
 
 # -------------------------------------------------------------------
 # Step 5: Verify readsb Beast output is available
